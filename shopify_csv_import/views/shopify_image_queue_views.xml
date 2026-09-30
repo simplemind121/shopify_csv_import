@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_shopify_image_queue_list" model="ir.ui.view">
+        <field name="name">shopify.image.queue.list</field>
+        <field name="model">shopify.image.queue</field>
+        <field name="arch" type="xml">
+            <list string="图片同步队列"
+                  decoration-danger="state == 'error'"
+                  decoration-success="state == 'done'"
+                  decoration-muted="state == 'pending'">
+                <field name="product_tmpl_id"/>
+                <field name="role"/>
+                <field name="source_url"/>
+                <field name="media_source_id"/>
+                <field name="state"/>
+                <field name="error_message"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_shopify_image_queue_form" model="ir.ui.view">
+        <field name="name">shopify.image.queue.form</field>
+        <field name="model">shopify.image.queue</field>
+        <field name="arch" type="xml">
+            <form string="图片同步记录">
+                <group>
+                    <field name="product_tmpl_id"/>
+                    <field name="product_variant_id"/>
+                    <field name="role"/>
+                    <field name="source_url"/>
+                    <field name="media_source_id"/>
+                    <field name="alist_target_path"/>
+                    <field name="state"/>
+                    <field name="error_message"/>
+                </group>
+                <footer>
+                    <button name="action_retry" string="重试" type="object" class="btn-primary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_shopify_image_queue_search" model="ir.ui.view">
+        <field name="name">shopify.image.queue.search</field>
+        <field name="model">shopify.image.queue</field>
+        <field name="arch" type="xml">
+            <search string="图片同步队列">
+                <field name="product_tmpl_id"/>
+                <field name="source_url"/>
+                <filter name="pending" string="待处理" domain="[('state', '=', 'pending')]"/>
+                <filter name="error" string="失败" domain="[('state', '=', 'error')]"/>
+                <filter name="done" string="已完成" domain="[('state', '=', 'done')]"/>
+                <group expand="0" string="分组">
+                    <filter name="group_state" string="按状态" context="{'group_by': 'state'}"/>
+                    <filter name="group_product" string="按商品" context="{'group_by': 'product_tmpl_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_shopify_image_queue" model="ir.actions.act_window">
+        <field name="name">图片同步队列</field>
+        <field name="res_model">shopify.image.queue</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_shopify_image_queue_search"/>
+        <field name="context">{'search_default_pending': 1}</field>
+    </record>
+
+</odoo>

@@ -1,0 +1,475 @@
+#!/bin/bash
+# ============================================================
+# shopify_csv_import 一键部署脚本 (v1.0 — 适配 19.0.1.0.0)
+#
+# 用法（本脚本和 shopify_csv_import*.zip / .tar.gz 放在同一目录）：
+#   sudo bash deploy_shopify_csv_import.sh                   # 部署到生产 (prod-odoo)
+#   sudo bash deploy_shopify_csv_import.sh --target staging  # 部署到 staging-odoo
+#   sudo bash deploy_shopify_csv_import.sh --rollback        # 回滚到最近一次部署前的备份
+#
+# 其他参数：
+#   --container NAME   指定 Odoo 容器（覆盖 --target）
+#   --db NAME          指定数据库（默认从 odoo.conf 的 dbfilter ^name$ 读取）
+#   --package FILE     指定安装包（默认：脚本目录 → 当前目录 → 你的家目录，取最新）
+#   --force            允许重装同版本以下的包（降级；默认拒绝）
+#   --skip-tests       跳过离线语法检查（不推荐）
+#   --no-backup        跳过部署前备份（不推荐）
+#   -h | --help        显示帮助
+#
+# 流程：校验安装包(版本/关键文件/离线语法检查) → 检查 media_picker 依赖是否在场
+#      → 输入一次数据库密码 → 备份数据库与旧模块 → 自动 -i / -u → 核对版本
+#      → 重启 → 健康检查 → 日志扫描
+# 失败时：安装/升级报错会自动恢复旧模块文件；数据库可用 --rollback 回退。
+#
+# 本脚本是照着同项目里 deploy_website_alist_media.sh 的路子写的（自动探测
+# 容器挂载、交互式输密码不落盘、部署前备份、部署后查数据库真实状态而不是
+# 只看命令退出码），但去掉了那个脚本里针对 Odoo 内部 JS 代码的兼容性检查
+# ——shopify_csv_import 只调用稳定的 ORM/公开方法，没有那类脆弱依赖。
+# ============================================================
+set -euo pipefail
+
+MODULE="shopify_csv_import"
+MIN_VERSION="19.0.1.0.0"
+TARGET="prod"
+CONTAINER=""
+DB_NAME=""
+PKG=""
+DO_BACKUP=1
+DO_TESTS=1
+FORCE=0
+MODE="deploy"
+BACKUP_ROOT="${SCI_BACKUP_ROOT:-/opt/prod-apps/backups/${MODULE}}"
+BACKUP_KEEP=5
+HEALTH_TIMEOUT=120
+DB_USER="odoo"
+DB_PORT="5432"
+
+# 模块必须存在的关键文件（缺任何一个 = 包不对，直接中止）
+REQUIRED_FILES=(
+  "__manifest__.py"
+  "models/product_template.py"
+  "models/shopify_image_queue.py"
+  "wizard/shopify_import_wizard.py"
+  "wizard/shopify_import_wizard_views.xml"
+  "views/shopify_import_menu.xml"
+  "views/shopify_image_queue_views.xml"
+  "security/ir.model.access.csv"
+  "data/ir_cron.xml"
+)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SEARCH_DIRS=("$SCRIPT_DIR" "$(pwd)")
+if [ -n "${SUDO_USER:-}" ]; then
+  SUDO_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)
+  [ -n "$SUDO_HOME" ] && SEARCH_DIRS+=("$SUDO_HOME")
+fi
+SEARCH_DIRS+=("$HOME")
+# 去重（保持顺序）
+_dedup=(); for d in "${SEARCH_DIRS[@]}"; do [[ " ${_dedup[*]} " == *" $d "* ]] || _dedup+=("$d"); done
+SEARCH_DIRS=("${_dedup[@]}"); unset _dedup
+
+log()  { echo -e "==> $*"; }
+ok()   { echo -e "[OK] $*"; }
+warn() { echo -e "[WARN] $*"; }
+err()  { echo -e "[ERROR] $*" >&2; }
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# 版本比较：ver_lt A B → A < B
+ver_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="${2:-}"; shift 2 ;;
+    --container) CONTAINER="${2:-}"; shift 2 ;;
+    --db) DB_NAME="${2:-}"; shift 2 ;;
+    --package) PKG="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --skip-tests) DO_TESTS=0; shift ;;
+    --no-backup) DO_BACKUP=0; shift ;;
+    --rollback) MODE="rollback"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "未知参数：$1"; usage; exit 1 ;;
+  esac
+done
+
+if [ "$(id -u)" -ne 0 ]; then
+  err "请用 sudo 或 root 运行本脚本：sudo bash $0"
+  exit 1
+fi
+
+TARGET_FLAG=""
+[ "$TARGET" != "prod" ] && TARGET_FLAG=" --target $TARGET"
+[ -n "$CONTAINER" ] && TARGET_FLAG="$TARGET_FLAG --container $CONTAINER"
+
+TMP_EXTRACT=""
+DB_PASSWORD=""
+cleanup() { unset DB_PASSWORD; [ -n "$TMP_EXTRACT" ] && rm -rf "$TMP_EXTRACT"; rm -f /tmp/sci_deploy_err /tmp/sci_restore_err; return 0; }
+trap cleanup EXIT
+
+# ============================================================ 0. 安装包预检（不需要密码，失败不改任何东西）
+if [ "$MODE" = "deploy" ]; then
+  log "查找 ${MODULE} 安装包"
+  if [ -n "$PKG" ]; then
+    [ -f "$PKG" ] || { err "指定的安装包不存在：$PKG"; exit 1; }
+  else
+    for d in "${SEARCH_DIRS[@]}"; do
+      [ -d "$d" ] || continue
+      found=$(find "$d" -maxdepth 1 -type f \
+                \( -iname "${MODULE}*.zip" -o -iname "${MODULE}*.tar.gz" -o -iname "${MODULE}*.tgz" \) \
+                ! -iname "*deploy_bundle*" -printf '%T@ %p\n' 2>/dev/null \
+              | sort -nr | head -n1 | cut -d' ' -f2- || true)
+      if [ -n "$found" ]; then PKG="$found"; break; fi
+    done
+  fi
+  if [ -z "$PKG" ]; then
+    err "在 ${SEARCH_DIRS[*]} 里没找到 ${MODULE}*.zip 或 ${MODULE}*.tar.gz（可用 --package 指定）"
+    exit 1
+  fi
+  ok "安装包：$PKG（$(date -r "$PKG" '+%F %T')）"
+
+  TMP_EXTRACT=$(mktemp -d)
+  case "$PKG" in
+    *.zip) command -v unzip >/dev/null || { err "缺少 unzip：apt-get install -y unzip"; exit 1; }
+           unzip -q -o "$PKG" -d "$TMP_EXTRACT" ;;
+    *.tar.gz|*.tgz) tar -xzf "$PKG" -C "$TMP_EXTRACT" ;;
+    *) err "不认识的包格式：$PKG"; exit 1 ;;
+  esac
+  MANIFEST_PATH=$(find "$TMP_EXTRACT" -maxdepth 4 -type f -name "__manifest__.py" | head -n1 || true)
+  if [ -z "$MANIFEST_PATH" ]; then
+    err "解压后没找到 __manifest__.py（可能传错文件），解压内容："
+    find "$TMP_EXTRACT" -maxdepth 2 | sed 's/^/  /'
+    exit 1
+  fi
+  MODULE_SRC_DIR=$(dirname "$MANIFEST_PATH")
+  PKG_VERSION=$(grep -oE "'version'[[:space:]]*:[[:space:]]*'[^']+'" "$MANIFEST_PATH" | grep -oE "[0-9]+(\.[0-9]+)+" | head -n1 || true)
+  if [ -z "$PKG_VERSION" ]; then
+    err "读不到 __manifest__.py 里的版本号，中止"
+    exit 1
+  fi
+  ok "安装包版本：$PKG_VERSION"
+  if ver_lt "$PKG_VERSION" "$MIN_VERSION"; then
+    err "本脚本适配 ${MIN_VERSION} 及以上；该包是 ${PKG_VERSION}，中止"
+    exit 1
+  fi
+
+  MISSING=0
+  for f in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "$MODULE_SRC_DIR/$f" ]; then err "  包内缺少：$f"; MISSING=1; fi
+  done
+  [ "$MISSING" = "0" ] || { err "安装包不完整，中止"; exit 1; }
+  ok "关键文件齐全（${#REQUIRED_FILES[@]} 项）"
+
+  if [ "$DO_TESTS" = "1" ]; then
+    log "离线语法检查（不连数据库、不联网）"
+    if command -v python3 >/dev/null; then
+      PYFILES=$(find "$MODULE_SRC_DIR" -name '*.py' -type f)
+      if ! python3 -m py_compile $PYFILES >/tmp/sci_deploy_err 2>&1; then
+        err "Python 语法检查失败，中止（尚未改动任何东西）："
+        tail -n 30 /tmp/sci_deploy_err >&2
+        exit 1
+      fi
+      ok "  Python：$(echo "$PYFILES" | wc -l) 个文件语法通过"
+    else
+      warn "  宿主机没有 python3，跳过语法检查"
+    fi
+    for x in "${MODULE_SRC_DIR}"/**/*.xml "${MODULE_SRC_DIR}"/*.xml; do
+      [ -f "$x" ] || continue
+      if command -v python3 >/dev/null; then
+        python3 -c "import xml.dom.minidom as m; m.parse('$x')" >/tmp/sci_deploy_err 2>&1 || {
+          err "XML 格式检查失败：$x"; cat /tmp/sci_deploy_err >&2; exit 1; }
+      fi
+    done
+    ok "  XML：格式检查通过"
+  else
+    warn "已跳过离线语法检查（--skip-tests）"
+  fi
+  find "$MODULE_SRC_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# ---------- 目标容器 ----------
+if [ -z "$CONTAINER" ]; then
+  case "$TARGET" in
+    prod) CONTAINER="prod-odoo" ;;
+    staging) CONTAINER="staging-odoo" ;;
+    *) err "--target 只能是 prod 或 staging"; exit 1 ;;
+  esac
+fi
+if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+  err "找不到容器 $CONTAINER（用 docker ps 查看实际名字，再用 --container 指定）"
+  exit 1
+fi
+DB_CONTAINER="${CONTAINER}-db"
+docker inspect "$DB_CONTAINER" >/dev/null 2>&1 || DB_CONTAINER=""
+
+# ---------- 从容器挂载自动识别 addons 目录与配置文件 ----------
+mount_source() {  # $1 = container path
+  docker inspect "$CONTAINER" --format '{{range .Mounts}}{{.Destination}}|{{.Source}}{{"\n"}}{{end}}' \
+    | awk -F'|' -v d="$1" '$1==d {print $2}' | head -n1
+}
+ADDONS_DIR=$(mount_source /mnt/extra-addons)
+CONFIG_DIR=$(mount_source /etc/odoo)
+if [ -z "$ADDONS_DIR" ] || [ ! -d "$ADDONS_DIR" ]; then
+  err "无法从 $CONTAINER 的挂载中找到 /mnt/extra-addons 对应的宿主机目录"
+  exit 1
+fi
+CONFIG_FILE=""
+if [ -n "$CONFIG_DIR" ] && [ -f "$CONFIG_DIR/odoo.conf" ]; then
+  CONFIG_FILE="$CONFIG_DIR/odoo.conf"
+fi
+
+# ---------- 依赖检查：media_picker 必须已经在 addons 目录里 ----------
+if [ "$MODE" = "deploy" ]; then
+  if [ -d "$ADDONS_DIR/media_picker" ]; then
+    ok "依赖检查：media_picker 已在 $ADDONS_DIR 里"
+  else
+    err "依赖检查失败：$ADDONS_DIR 里没有 media_picker"
+    err "shopify_csv_import 依赖 media_picker（图片走 CDN 用的 media.bind / product.media.source 接口），先部署 media_picker 再跑本脚本"
+    exit 1
+  fi
+fi
+
+conf_get() {  # $1 = key; prints value or nothing
+  [ -n "$CONFIG_FILE" ] || return 0
+  grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG_FILE" | tail -n1 \
+    | sed -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//" | tr -d '\r' | xargs || true
+}
+container_env() { docker exec "$CONTAINER" printenv "$1" 2>/dev/null || true; }
+
+DB_HOST=$(conf_get db_host); [ -n "$DB_HOST" ] || DB_HOST=$(container_env HOST); DB_HOST=${DB_HOST:-odoo-db}
+V=$(conf_get db_port); DB_PORT=${V:-$DB_PORT}
+V=$(conf_get db_user); [ -n "$V" ] || V=$(container_env USER); DB_USER=${V:-$DB_USER}
+V=$(conf_get http_port); HTTP_PORT=${V:-8069}
+if [ -z "$DB_NAME" ]; then
+  DBF=$(conf_get dbfilter)
+  if [[ "$DBF" =~ ^\^([A-Za-z0-9_.-]+)\$$ ]]; then
+    DB_NAME="${BASH_REMATCH[1]}"
+  else
+    err "无法从 dbfilter（${DBF:-未设置}）推断数据库名，请用 --db 指定"
+    exit 1
+  fi
+fi
+BACKUP_DIR_BASE="$BACKUP_ROOT/${CONTAINER}_${DB_NAME}"
+
+echo
+log "目标：容器=$CONTAINER  数据库=$DB_NAME  addons=$ADDONS_DIR"
+log "      配置=${CONFIG_FILE:-未找到}  DB=$DB_USER@$DB_HOST:$DB_PORT  DB容器=${DB_CONTAINER:-无}"
+echo
+
+read -rsp "请输入 Odoo 数据库密码（$DB_USER@$DB_NAME，不会显示、不会保存）: " DB_PASSWORD
+echo
+if [ -z "$DB_PASSWORD" ]; then
+  err "密码不能为空"
+  exit 1
+fi
+
+db_query() {
+  docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER" \
+    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc "$1"
+}
+pg_tool() {  # $1 = pg_dump|pg_restore, rest = args
+  local tool="$1"; shift
+  if [ -n "$DB_CONTAINER" ]; then
+    docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$DB_CONTAINER" "$tool" -h 127.0.0.1 -p 5432 -U "$DB_USER" "$@"
+  else
+    docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER" "$tool" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" "$@"
+  fi
+}
+
+log "测试数据库连接"
+if ! db_query "SELECT 1" >/dev/null 2>/tmp/sci_deploy_err; then
+  err "无法连接数据库（密码错误或连接失败），中止："
+  cat /tmp/sci_deploy_err >&2
+  exit 1
+fi
+ok "数据库连接正常"
+
+# ============================================================ ROLLBACK
+if [ "$MODE" = "rollback" ]; then
+  LATEST=$(ls -1d "$BACKUP_DIR_BASE"/*/ 2>/dev/null | sort | tail -n1 || true)
+  LATEST=${LATEST%/}
+  if [ -z "$LATEST" ] || [ ! -s "$LATEST/db.dump" ]; then
+    err "没有找到可用备份：$BACKUP_DIR_BASE"
+    exit 1
+  fi
+  echo
+  warn "即将回滚到备份：$LATEST"
+  [ -f "$LATEST/meta.txt" ] && sed 's/^/        /' "$LATEST/meta.txt"
+  warn "数据库 $DB_NAME 会被备份覆盖：备份之后产生的所有数据都会丢失！"
+  read -rp "确认请输入数据库名 $DB_NAME ：" CONFIRM
+  if [ "$CONFIRM" != "$DB_NAME" ]; then
+    err "输入不一致，已取消，未做任何改动"
+    exit 1
+  fi
+  log "停止 $CONTAINER（避免回滚期间写入）"
+  docker stop "$CONTAINER" >/dev/null
+  trap 'docker start "$CONTAINER" >/dev/null 2>&1 || true; cleanup' EXIT
+  log "恢复模块目录"
+  rm -rf "${ADDONS_DIR:?}/${MODULE}"
+  if [ -d "$LATEST/module/${MODULE}" ]; then
+    cp -a "$LATEST/module/${MODULE}" "$ADDONS_DIR/${MODULE}"
+    ok "模块目录已恢复"
+  else
+    ok "备份时模块尚未部署，已移除模块目录"
+  fi
+  log "恢复数据库（pg_restore --clean --if-exists）"
+  RESTORE_RC=0
+  pg_tool pg_restore --clean --if-exists --no-owner -d "$DB_NAME" < "$LATEST/db.dump" 2>/tmp/sci_restore_err || RESTORE_RC=$?
+  if [ "$RESTORE_RC" != "0" ]; then
+    NERR=$(grep -c "error:" /tmp/sci_restore_err || true)
+    warn "pg_restore 返回码 $RESTORE_RC，报告 $NERR 条错误（前 10 条如下）。"
+    warn "扩展/注释/权限类错误通常可忽略；其他错误请保留该输出并检查网站。"
+    head -n 10 /tmp/sci_restore_err | sed 's/^/        /'
+  fi
+  docker start "$CONTAINER" >/dev/null
+  trap cleanup EXIT
+  ok "回滚完成，$CONTAINER 已启动。浏览器请强制刷新（Ctrl+Shift+R）。"
+  exit 0
+fi
+
+# ============================================================ DEPLOY
+# ---------- 1. 当前状态 + 降级保护 ----------
+STATE=$(db_query "SELECT COALESCE((SELECT state FROM ir_module_module WHERE name='${MODULE}'), 'absent');" | xargs)
+OLD_VERSION=$(db_query "SELECT COALESCE((SELECT latest_version FROM ir_module_module WHERE name='${MODULE}'), '');" | xargs || true)
+MP_STATE=$(db_query "SELECT COALESCE((SELECT state FROM ir_module_module WHERE name='media_picker'), 'absent');" | xargs || true)
+if [ "$MP_STATE" != "installed" ]; then
+  warn "media_picker 在数据库里的状态是「$MP_STATE」而不是 installed"
+  warn "-i/-u shopify_csv_import 时 Odoo 会尝试把它作为依赖一并安装；如果失败，先手动装好 media_picker 再重试"
+fi
+case "$STATE" in
+  installed|"to upgrade") ACTION="-u"; ok "已安装（${OLD_VERSION:-?}）→ 升级 -u → $PKG_VERSION" ;;
+  *)                      ACTION="-i"; ok "状态：$STATE → 安装 -i → $PKG_VERSION" ;;
+esac
+if [ "$ACTION" = "-u" ] && [ -n "$OLD_VERSION" ]; then
+  if ver_lt "$PKG_VERSION" "$OLD_VERSION"; then
+    if [ "$FORCE" = "1" ]; then
+      warn "降级：$OLD_VERSION → $PKG_VERSION（--force 已允许）"
+    else
+      err "安装包 $PKG_VERSION 比数据库里的 $OLD_VERSION 旧，拒绝降级（可能拿错了包）。确需降级请加 --force"
+      exit 1
+    fi
+  elif [ "$PKG_VERSION" = "$OLD_VERSION" ]; then
+    warn "同版本重装（$PKG_VERSION），会重新加载代码与视图"
+  fi
+fi
+
+# ---------- 2. 备份（数据库 + 旧模块目录）----------
+BK=""
+if [ "$DO_BACKUP" = "1" ]; then
+  TS=$(date +%Y%m%d_%H%M%S)
+  BK="$BACKUP_DIR_BASE/$TS"
+  mkdir -p "$BK"
+  chmod 700 "$BACKUP_ROOT" "$BACKUP_DIR_BASE" "$BK" 2>/dev/null || true
+  log "备份数据库 $DB_NAME → $BK/db.dump"
+  if ! pg_tool pg_dump -Fc -d "$DB_NAME" > "$BK/db.dump" 2>"$BK/pg_dump.err" || [ ! -s "$BK/db.dump" ]; then
+    err "数据库备份失败，已中止部署（尚未改动任何东西）："
+    cat "$BK/pg_dump.err" >&2
+    rm -rf "$BK"
+    err "如确需跳过备份，可加 --no-backup（不推荐）"
+    exit 1
+  fi
+  rm -f "$BK/pg_dump.err"
+  if [ -d "$ADDONS_DIR/$MODULE" ]; then
+    mkdir -p "$BK/module" && cp -a "$ADDONS_DIR/$MODULE" "$BK/module/"
+  fi
+  printf "time=%s\ncontainer=%s\ndb=%s\nmodule_state=%s\nmodule_version=%s\nupgrading_to=%s\npackage=%s\n" \
+    "$TS" "$CONTAINER" "$DB_NAME" "$STATE" "${OLD_VERSION:-}" "${PKG_VERSION:-}" "$PKG" > "$BK/meta.txt"
+  chmod 600 "$BK/db.dump"
+  ok "备份完成（$(du -sh "$BK" | cut -f1)）。回滚命令：sudo bash $0 --rollback$TARGET_FLAG"
+  ls -1d "$BACKUP_DIR_BASE"/*/ 2>/dev/null | sort | head -n -"$BACKUP_KEEP" | xargs -r rm -rf
+else
+  warn "已跳过备份（--no-backup），此次部署无法用 --rollback 回退"
+fi
+
+restore_module_files() {
+  rm -rf "${ADDONS_DIR:?}/${MODULE}"
+  if [ -n "$BK" ] && [ -d "$BK/module/${MODULE}" ]; then
+    cp -a "$BK/module/${MODULE}" "$ADDONS_DIR/${MODULE}"
+    warn "已自动恢复部署前的模块文件（$OLD_VERSION）"
+  elif [ -z "$BK" ]; then
+    warn "无备份（--no-backup），模块目录已移除；请手动放回旧版本"
+  else
+    warn "部署前没有该模块，已移除模块目录"
+  fi
+}
+
+# ---------- 3. 部署文件（权限与 addons 目录一致，避免容器内读不到）----------
+rm -rf "${ADDONS_DIR:?}/${MODULE}"
+cp -a "$MODULE_SRC_DIR" "$ADDONS_DIR/${MODULE}"
+chown -R "$(stat -c '%u:%g' "$ADDONS_DIR")" "$ADDONS_DIR/${MODULE}"
+chmod -R u=rwX,go=rX "$ADDONS_DIR/${MODULE}"
+ok "文件已部署：$ADDONS_DIR/${MODULE}"
+
+# ---------- 4. 安装/升级 ----------
+log "在 $DB_NAME 上执行 odoo $ACTION $MODULE"
+if ! docker exec "$CONTAINER" odoo "$ACTION" "$MODULE" -d "$DB_NAME" \
+     --db_host="$DB_HOST" --db_port="$DB_PORT" --db_user="$DB_USER" \
+     --db_password="$DB_PASSWORD" --no-http --stop-after-init; then
+  err "安装/升级失败（容器未重启，线上仍在跑旧代码）。"
+  restore_module_files
+  err "看上面的 Odoo 报错定位问题；若数据库状态异常，可回滚：sudo bash $0 --rollback$TARGET_FLAG"
+  exit 1
+fi
+NEW_STATE=$(db_query "SELECT state FROM ir_module_module WHERE name='${MODULE}';" | xargs || true)
+NEW_VERSION=$(db_query "SELECT COALESCE(latest_version,'') FROM ir_module_module WHERE name='${MODULE}';" | xargs || true)
+if [ "$NEW_STATE" != "installed" ]; then
+  err "执行后模块状态为「${NEW_STATE:-未知}」，不是 installed。容器未重启。回滚：sudo bash $0 --rollback$TARGET_FLAG"
+  exit 1
+fi
+if [ "$NEW_VERSION" != "$PKG_VERSION" ]; then
+  err "数据库版本 ${NEW_VERSION:-未知} ≠ 安装包版本 $PKG_VERSION —— 新代码未生效。容器未重启。回滚：sudo bash $0 --rollback$TARGET_FLAG"
+  exit 1
+fi
+ok "数据库确认：${MODULE} 已安装，版本 $NEW_VERSION"
+
+# ---------- 5. 重启 + 健康检查 ----------
+RESTART_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+docker restart "$CONTAINER" >/dev/null
+ok "已重启 $CONTAINER，等待服务就绪（最多 ${HEALTH_TIMEOUT}s）"
+HEALTHY=0
+for _ in $(seq 1 $((HEALTH_TIMEOUT / 3))); do
+  if docker exec "$CONTAINER" python3 -c \
+      "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${HTTP_PORT}/web/health', timeout=3)" \
+      >/dev/null 2>&1; then
+    HEALTHY=1; break
+  fi
+  sleep 3
+done
+if [ "$HEALTHY" = "1" ]; then
+  ok "健康检查通过（/web/health）"
+else
+  warn "${HEALTH_TIMEOUT}s 内健康检查未通过，请看：docker logs --since $RESTART_AT $CONTAINER"
+  warn "如网站打不开，回滚：sudo bash $0 --rollback$TARGET_FLAG"
+fi
+
+# ---------- 6. 启动日志扫描 ----------
+LOG_ERR=$(docker logs --since "$RESTART_AT" "$CONTAINER" 2>&1 | grep -E " (ERROR|CRITICAL) |Traceback" | head -n 15 || true)
+if [ -n "$LOG_ERR" ]; then
+  warn "重启后日志中有错误（前 15 行）："
+  echo "$LOG_ERR" | sed 's/^/        /'
+  echo "$LOG_ERR" | grep -q "$MODULE" && warn "其中涉及 ${MODULE}，请重点检查"
+else
+  ok "重启后日志无 ERROR"
+fi
+
+# ---------- 7. 安全 / 可用性检查 ----------
+if [ -n "$CONFIG_FILE" ]; then
+  if grep -qE "^[[:space:]]*dbfilter[[:space:]]*=" "$CONFIG_FILE" && grep -qE "^[[:space:]]*list_db[[:space:]]*=[[:space:]]*[Ff]alse" "$CONFIG_FILE"; then
+    ok "dbfilter / list_db 配置安全"
+  else
+    warn "$CONFIG_FILE 缺少安全配置：dbfilter = ^${DB_NAME}\$ 与 list_db = False"
+  fi
+fi
+MS_COUNT=$(db_query "SELECT count(*) FROM product_media_source;" 2>/dev/null | xargs || true)
+if [ -n "$MS_COUNT" ] && [ "$MS_COUNT" != "0" ]; then
+  ok "检测到 $MS_COUNT 个 product.media.source（Alist 图片源）可在导入向导里选用"
+else
+  warn "没检测到任何 product.media.source——图片会全部走本地二进制兜底，想用 CDN 得先在 media_picker 里配一个"
+fi
+
+echo
+ok "全部完成（$CONTAINER / $DB_NAME / $NEW_VERSION）"
+echo "接下来："
+echo "  1. 浏览器强制刷新（Ctrl+Shift+R）"
+echo "  2. 应用 → shopify_csv_import 版本号确认为 $NEW_VERSION"
+echo "  3. 顶部菜单「Shopify 导入」→「导入商品 CSV」，先拿一份小 CSV 测一遍"
+echo "  4. 如需回退：sudo bash $0 --rollback$TARGET_FLAG"

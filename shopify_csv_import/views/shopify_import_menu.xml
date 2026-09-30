@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <menuitem id="menu_shopify_import_root"
+              name="Shopify 导入"
+              sequence="95"
+              groups="base.group_system"/>
+
+    <menuitem id="menu_shopify_import_wizard"
+              name="导入商品 CSV"
+              parent="menu_shopify_import_root"
+              action="shopify_csv_import.action_shopify_import_wizard"
+              sequence="10"/>
+
+    <menuitem id="menu_shopify_image_queue"
+              name="图片同步队列"
+              parent="menu_shopify_import_root"
+              action="shopify_csv_import.action_shopify_image_queue"
+              sequence="20"/>
+
+</odoo>
