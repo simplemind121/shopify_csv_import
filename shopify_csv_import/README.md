@@ -55,6 +55,12 @@ website_sale 自建商城。
 - 没选图片源，或者上传/解析失败，就直接下载存成 Odoo 标准二进制图片
   （`image_1920` / `product.image`），保证图片总归能正常显示
 
+**Alist token 要配对**：上传需要**有写权限**的 token。token 的读取方式和
+media_picker 一样——`secret_ref` 填的是**环境变量名**（优先），否则用 `alist_token`
+字段。不要把 token 本身填进 `secret_ref`：那样 media_picker 的「测试连接」仍然会
+成功（读目录用访客权限就行），但上传会被拒绝（403）。CDN 失败时图片会自动回退成
+本地二进制，「图片同步队列」里的「存储位置」「CDN 失败原因」两列会写明原因。
+
 **用之前确认一下**：你选的那个 `product.media.source` 记录上的
 `trusted_domains` 字段（或者全局系统参数 `media_picker.trusted_domains`）
 要包含 `media.051288888.xyz`，不然域名校验会失败，自动回退成本地二进制——
@@ -86,7 +92,7 @@ website_sale 自建商城。
 ## 测试
 
 仓库根目录执行 `./dev/run_tests.sh`，会在一个临时 Odoo 19 数据库里跑
-`tests/` 下的 34 个用例（CSV 解析、单/多变体、价格换算、分类、标签、重复导入、
+`tests/` 下的 36 个用例（CSV 解析、单/多变体、价格换算、分类、标签、重复导入、
 单个商品失败隔离、图片队列、Alist/media_picker 链路，网络全部 mock）。
 详见仓库根目录 README 的「运行测试」一节。
 

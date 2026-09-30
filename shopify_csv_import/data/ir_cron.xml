@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
+    <!-- noupdate：你在后台改过的启停/间隔，模块升级时不会被覆盖回默认值 -->
+    <data noupdate="1">
 
     <record id="ir_cron_shopify_image_sync" model="ir.cron">
         <field name="name">Shopify 图片同步</field>
@@ -11,4 +13,5 @@
         <field name="active">True</field>
     </record>
 
+    </data>
 </odoo>

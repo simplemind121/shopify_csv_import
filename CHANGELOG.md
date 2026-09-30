@@ -2,6 +2,33 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.1.0.3] - 2026-10-01
+
+Verified against the **real `media_picker` 19.0.3.4.3** (all 36 tests pass
+with it, not just with the test double) and against a **real Alist server**
+in a local Odoo 19 install.
+
+### Fixed
+
+- **CDN upload always failed with 403 when the Alist token is configured via
+  `secret_ref`.** `media_picker` resolves the token as
+  `os.environ[secret_ref]` first and `alist_token` second; the upload only
+  read `alist_token`, so it sent no token and Alist rejected the write
+  (`403 permission denied`) while media_picker's own read-only "test
+  connection" still succeeded as guest. The upload now resolves the token
+  exactly like `pem_alist_client._request`, and refuses to send an
+  unauthenticated upload (clear message instead of a 403).
+- **CDN failures were invisible.** A failed upload silently fell back to a
+  local binary image and the queue row still said "done". Rows now record
+  `storage` (CDN / local binary) and `cdn_error` (why the CDN path failed);
+  both are shown in the queue list with a "CDN 失败、已回退本地" filter, and the
+  "立即同步一批图片" notification warns when fallbacks happened. The failure is
+  logged at WARNING instead of INFO.
+- 403 from Alist now explains that the token's user lacks write permission
+  on the target path.
+- The image-sync cron is `noupdate`: enabling/disabling it or changing its
+  interval in Settings is no longer reset by a module upgrade.
+
 ## [19.0.1.0.2] - 2026-09-30
 
 Verified against a **real Shopify export** (284 products, 1,597 rows, 1,582

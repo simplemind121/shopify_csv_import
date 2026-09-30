@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import base64
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -60,6 +61,13 @@ class ShopifyImageQueue(models.Model):
         ('error', '失败'),
     ], string='状态', default='pending', index=True)
     error_message = fields.Char(string='错误信息')
+    # 实际存到了哪里。选了 Alist 图片源但上传/解析失败时会自动回退成本地二进制，
+    # 这里要能看出来，不能让"已完成"掩盖"其实没上 CDN"。
+    storage = fields.Selection([
+        ('cdn', 'CDN（media.bind）'),
+        ('binary', '本地二进制'),
+    ], string='存储位置', readonly=True, copy=False)
+    cdn_error = fields.Char(string='CDN 失败原因', readonly=True, copy=False)
 
     # ---------------------------------------------------------------
     # cron 入口
@@ -169,8 +177,11 @@ class ShopifyImageQueue(models.Model):
             # savepoint：写图片时如果触发数据库错误（例如图片字段校验失败），
             # 只回滚这一张图，事务还能继续把 state=error 写进去、处理下一张。
             with self.env.cr.savepoint():
-                self._process_one(download)
-            self.write({'state': 'done', 'error_message': False})
+                storage, cdn_error = self._process_one(download)
+            self.write({
+                'state': 'done', 'error_message': False,
+                'storage': storage, 'cdn_error': cdn_error,
+            })
         except Exception as e:
             _logger.exception('图片同步失败: %s', self.source_url)
             self.write({'state': 'error', 'error_message': str(e)[:250]})
@@ -182,22 +193,23 @@ class ShopifyImageQueue(models.Model):
             raise ValueError('下载失败或返回空内容')
 
         cdn_url = False
+        cdn_error = False
         if self.media_source_id:
             try:
                 cdn_url = self._upload_and_resolve(content)
-            except Exception:
-                # Alist 上传/解析失败：记录日志，直接走本地二进制兜底，
-                # 不让图片同步整体失败。
-                _logger.info(
-                    'Alist 上传/解析失败，改用本地二进制存储: %s',
-                    self.source_url, exc_info=True,
-                )
+            except Exception as e:
+                # Alist 上传/解析失败：直接走本地二进制兜底，不让图片同步整体失败，
+                # 但要把原因记在记录上（以前只写 INFO 日志，界面上完全看不出来）。
+                _logger.warning(
+                    'Alist 上传/解析失败，改用本地二进制存储: %s (%s)', self.source_url, e)
                 cdn_url = False
+                cdn_error = str(e)[:250]
 
         if cdn_url:
             self._save_via_media_bind(cdn_url)
-        else:
-            self._save_binary(content)
+            return 'cdn', False
+        self._save_binary(content)
+        return 'binary', cdn_error
 
     # ---------------------------------------------------------------
     # 方案 A：本地二进制兜底（不依赖 media_picker）
@@ -327,11 +339,17 @@ class ShopifyImageQueue(models.Model):
             raise RuntimeError('服务器缺少 requests 库，无法上传图片')
         if not source.alist_url:
             raise ValueError('这个 Alist 图片源没有配置 alist_url')
+        token = ShopifyImageQueue._alist_token(source)
+        if not token:
+            raise ValueError(
+                '这个 Alist 图片源没有可用的 token：alist_token 为空，secret_ref 也没有指向'
+                '一个存在的环境变量。读目录可以用访客权限（所以"测试连接"能成功），'
+                '但上传必须带有写权限的 token')
 
         resp = requests.put(
             f"{source.alist_url.rstrip('/')}/api/fs/put",
             headers={
-                'Authorization': source.alist_token or '',
+                'Authorization': token,
                 'File-Path': requests.utils.quote(path, safe=''),
                 'Content-Type': 'application/octet-stream',
                 'As-Task': 'false',
@@ -341,5 +359,17 @@ class ShopifyImageQueue(models.Model):
         )
         resp.raise_for_status()
         data = resp.json()
+        if data.get('code') == 403:
+            raise ValueError(
+                f"Alist 拒绝上传（403 {data.get('message')}）：这个 token 对应的 Alist 用户"
+                f"没有写入 {path} 的权限")
         if data.get('code') != 200:
             raise ValueError(f'Alist 上传失败: {data}')
+
+    @staticmethod
+    def _alist_token(source):
+        """和 media_picker 的 pem_alist_client._request 取 token 的方式保持一致：
+        secret_ref 是环境变量名（优先），否则用 alist_token 字段。"""
+        secret_ref = (getattr(source, 'secret_ref', None) or '').strip()
+        token = os.environ.get(secret_ref) if secret_ref else None
+        return token or source.alist_token or ''

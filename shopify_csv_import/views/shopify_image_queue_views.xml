@@ -14,7 +14,9 @@
                 <field name="source_url"/>
                 <field name="media_source_id"/>
                 <field name="state"/>
+                <field name="storage" optional="show"/>
                 <field name="error_message"/>
+                <field name="cdn_error" optional="show"/>
             </list>
         </field>
     </record>
@@ -32,7 +34,9 @@
                     <field name="media_source_id"/>
                     <field name="alist_target_path"/>
                     <field name="state"/>
+                    <field name="storage"/>
                     <field name="error_message"/>
+                    <field name="cdn_error"/>
                 </group>
                 <footer>
                     <button name="action_retry" string="重试" type="object" class="btn-primary"/>
@@ -51,6 +55,9 @@
                 <filter name="pending" string="待处理" domain="[('state', '=', 'pending')]"/>
                 <filter name="error" string="失败" domain="[('state', '=', 'error')]"/>
                 <filter name="done" string="已完成" domain="[('state', '=', 'done')]"/>
+                <separator/>
+                <filter name="cdn_fallback" string="CDN 失败、已回退本地"
+                        domain="[('cdn_error', '!=', False)]"/>
                 <separator/>
                 <group>
                     <filter name="group_state" string="按状态" context="{'group_by': 'state'}"/>

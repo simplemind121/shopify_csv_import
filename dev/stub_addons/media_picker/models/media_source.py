@@ -7,9 +7,10 @@ class ProductMediaSource(models.Model):
     _description = 'Alist media source (stub)'
 
     name = fields.Char(required=True)
-    alist_url = fields.Char()
+    alist_url = fields.Char(required=True)  # 和真实 media_picker 一致：必填
     alist_token = fields.Char()
-    trusted_domains = fields.Char(help='Comma separated host names')
+    secret_ref = fields.Char(help='Name of an environment variable holding the token')
+    trusted_domains = fields.Char(required=True, help='Comma separated host names')  # 真实模块里也是必填
 
     def _check_domain_trusted(self, hostname):
         self.ensure_one()

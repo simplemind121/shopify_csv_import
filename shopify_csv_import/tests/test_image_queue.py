@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 from unittest.mock import call, patch
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -123,6 +124,8 @@ class TestShopifyImageQueue(ShopifyImportCase):
                 rec._process()
 
         self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+        self.assertEqual(set(rows.mapped('storage')), {'cdn'})
+        self.assertFalse(any(rows.mapped('cdn_error')))
         self.assertEqual(put.call_count, 2)
         url, kwargs = put.call_args_list[0].args[0], put.call_args_list[0].kwargs
         self.assertEqual(url, 'https://alist.example.com/api/fs/put')
@@ -173,6 +176,40 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertEqual(main.state, 'done')
         self.assertTrue(mug.image_1920)
         self.assertFalse(mug.use_external_media)
+        # 回退本地必须在记录上看得出来
+        self.assertEqual(main.storage, 'binary')
+        self.assertIn('403', main.cdn_error)
+
+    def test_09b_token_from_secret_ref_env_var(self):
+        """和 media_picker 一样：secret_ref 是环境变量名，token 从环境变量读。"""
+        source = self._alist_source()
+        source.write({'alist_token': False, 'secret_ref': 'SCI_TEST_ALIST_TOKEN'})
+        self._run_import(media_source_id=source.id)
+        mug = self._tmpl('sci-test-mug')
+        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
+        put_resp = fake_response(json_data={'code': 200})
+        with patch.dict(os.environ, {'SCI_TEST_ALIST_TOKEN': 'token-from-env'}), self._mock_get(), \
+                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp) as put, \
+                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/a.jpg'}):
+            main._process()
+        self.assertEqual(put.call_args.kwargs['headers']['Authorization'], 'token-from-env')
+        self.assertEqual(main.storage, 'cdn')
+
+    def test_09c_missing_token_falls_back_with_reason(self):
+        """没 token 时不发请求（发了也只会 403），直接回退本地并写明原因。"""
+        source = self._alist_source()
+        source.write({'alist_token': False, 'secret_ref': 'SCI_TEST_UNSET_VAR'})
+        self._run_import(media_source_id=source.id)
+        mug = self._tmpl('sci-test-mug')
+        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
+        with patch.dict(os.environ, {}, clear=False), self._mock_get(), \
+                patch(f'{QUEUE_MODULE}.requests.put') as put:
+            os.environ.pop('SCI_TEST_UNSET_VAR', None)
+            main._process()
+        put.assert_not_called()
+        self.assertEqual((main.state, main.storage), ('done', 'binary'))
+        self.assertIn('token', main.cdn_error)
+        self.assertTrue(mug.image_1920)
 
     def test_10_variant_bind_does_not_overwrite_gallery_bind(self):
         source = self._alist_source()

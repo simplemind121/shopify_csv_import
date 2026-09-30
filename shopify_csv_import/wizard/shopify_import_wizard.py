@@ -109,6 +109,7 @@ class ShopifyImportWizard(models.TransientModel):
         processed = Queue._cron_process_pending(limit=50)
         remaining = Queue.search_count([('state', '=', 'pending')])
         failed = Queue.search_count([('state', '=', 'error')])
+        cdn_fallback = Queue.search_count([('cdn_error', '!=', False)])
         # 注意：不能用 raise UserError 来显示结果——UserError 会让整个请求事务回滚，
         # 刚处理完的图片也会跟着被撤销。这里改成返回一个前端通知。
         return {
@@ -117,8 +118,10 @@ class ShopifyImportWizard(models.TransientModel):
             'params': {
                 'title': '图片同步',
                 'message': f'本次处理 {processed} 张图片；剩余待处理 {remaining} 张，'
-                           f'累计失败 {failed} 张（剩余的会由后台任务每几分钟继续处理）。',
-                'type': 'warning' if failed else 'success',
+                           f'累计失败 {failed} 张（剩余的会由后台任务每几分钟继续处理）。'
+                           + (f'注意：有 {cdn_fallback} 张上传 Alist 失败、已回退成本地图片，'
+                              f'原因见「图片同步队列」的「CDN 失败原因」列。' if cdn_fallback else ''),
+                'type': 'warning' if (failed or cdn_fallback) else 'success',
                 'sticky': False,
             },
         }

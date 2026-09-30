@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Shopify CSV 商品导入',
-    'version': '19.0.1.0.2',
+    'version': '19.0.1.0.3',
     'category': 'Sales/Sales',
     'summary': '将 Shopify 导出的商品 CSV 一键导入到 Odoo 网站商城',
     'description': """

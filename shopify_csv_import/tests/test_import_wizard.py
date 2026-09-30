@@ -153,7 +153,9 @@ class TestShopifyImportWizard(ShopifyImportCase):
         self.assertTrue(variant_row.source_url.endswith('tee-blue.jpg'))
 
     def test_11_media_source_sets_alist_path(self):
-        source = self.env['product.media.source'].create({'name': 'Test Alist'})
+        source = self.env['product.media.source'].create({
+            'name': 'Test Alist', 'alist_url': 'https://alist.example.com',
+            'trusted_domains': 'media.example.com'})
         self._run_import(media_source_id=source.id, alist_upload_path_prefix='/b2/test/')
         mug = self._tmpl('sci-test-mug')
         rows = self.Queue.search([('product_tmpl_id', '=', mug.id)], order='sequence')
