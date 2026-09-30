@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| **最新版本** | [`19.0.1.0.0`](./CHANGELOG.md#19010---2026-09-30) |
+| **最新版本** | [`19.0.1.0.1`](./CHANGELOG.md#19011---2026-09-30) |
 | **模块技术名** | `shopify_csv_import` |
 | **Odoo** | 19 社区版 |
 | **依赖** | `website_sale`、`product`、`media_picker` |
@@ -53,14 +53,18 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 | `VERSION` | 当前推荐版本号（单行） |
 | `CHANGELOG.md` | 面向用户的变更历史 |
 | `docs/` | 部署 / 运维说明 |
+| `shopify_csv_import/tests/` | Odoo 测试用例 + 一份 Shopify 导出 CSV 样例 |
+| `dev/run_tests.sh` | 在临时 Odoo 19 数据库上跑测试 |
+| `dev/stub_addons/media_picker/` | media_picker 接口的测试替身——**只用于开发/CI，不要部署** |
 
 ---
 
-## 功能矩阵（当前版本 19.0.1.0.0）
+## 功能矩阵（当前版本 19.0.1.0.1）
 
 | 功能 | 状态 |
 |---|---|
 | 商品/变体/价格/成本/SKU/条码/重量导入 | 支持 |
+| 变体独立售价 | 支持，换算成 Odoo 的"基础价 + 属性加价"；无法这样表达的价格表会在导入日志里给出警告 |
 | 多级网站分类 + 内部分类映射 | 支持 |
 | Vendor → 品牌标签（过滤网址垃圾数据）+ Shopify Tags → 标签 | 支持 |
 | 幂等重复导入（按 Handle 去重） | 支持 |
@@ -69,6 +73,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 | 经 `media_picker` 的 `media.bind` 走 Alist/B2 CDN 图片同步 | 支持 |
 | 划线原价 / 礼品卡 / SEO metafields | 未映射（当前场景用不上） |
 | 超大商品目录的分批提交 | 暂无 |
+| 在真实 Odoo 19 数据库上的自动化测试 | 有——26 个用例，见下文 |
 
 ---
 
@@ -76,7 +81,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 
 ```bash
 # 1) clone 这个仓库，或者从 Release 里下载：
-#    shopify_csv_import-19.0.1.0.0.zip
+#    shopify_csv_import-19.0.1.0.1.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) 两个文件放同一目录，在 VPS 上执行
@@ -107,6 +112,26 @@ sudo ./deploy_shopify_csv_import.sh                     # 确认没问题再上�
 
 这个模块里没有任何 QWeb 模板 override——商城前台怎么显示图片，完全是
 `media_picker` 自己那套已经验证过的代码。
+
+---
+
+## 运行测试
+
+```bash
+./dev/run_tests.sh                 # Docker：临时起 postgres:16 + odoo:19.0，跑完自动删除
+```
+
+拉不到 Docker Hub 镜像时，可以指向本机的 Odoo 19 源码：
+
+```bash
+ODOO_SRC=~/src/odoo-19 PYTHON=~/venvs/odoo19/bin/python \
+DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=odoo DB_PASSWORD=odoo ./dev/run_tests.sh
+```
+
+测试会把本模块和 `dev/stub_addons/media_picker`（media_picker 接口的测试替身，
+**只用于开发/CI，不要部署**；想用真实模块测就设 `MEDIA_PICKER_DIR=/path/to/media_picker`）
+一起装进一个临时数据库，所有网络调用（下载 Shopify 图片、Alist 上传、`get_file`）
+都是 mock 的。GitHub Actions 每次 push / PR 都会跑同一个脚本。
 
 ---
 

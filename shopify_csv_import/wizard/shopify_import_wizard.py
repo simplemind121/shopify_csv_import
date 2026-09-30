@@ -8,6 +8,7 @@ from collections import OrderedDict
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import float_compare, float_round
 
 _logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class ShopifyImportWizard(models.TransientModel):
         for handle, group_rows in groups.items():
             try:
                 with self.env.cr.savepoint():
-                    tmpl, is_new, n_images = self._import_one_product(handle, group_rows)
+                    tmpl, is_new, n_images, warnings = self._import_one_product(handle, group_rows)
                 image_queue_total += n_images
                 if is_new:
                     created += 1
@@ -76,6 +77,7 @@ class ShopifyImportWizard(models.TransientModel):
                 else:
                     updated += 1
                     log_lines.append(f'[更新] {handle} -> {tmpl.name}（排队图片 {n_images} 张）')
+                log_lines += [f'[警告] {handle}: {w}' for w in warnings]
             except Exception as e:
                 errors += 1
                 _logger.exception('导入商品失败: handle=%s', handle)
@@ -92,6 +94,7 @@ class ShopifyImportWizard(models.TransientModel):
 
         return {
             'type': 'ir.actions.act_window',
+            'name': '导入 Shopify 商品',
             'res_model': 'shopify.import.wizard',
             'res_id': self.id,
             'view_mode': 'form',
@@ -101,8 +104,23 @@ class ShopifyImportWizard(models.TransientModel):
     def action_process_images_now(self):
         """手动立即处理一批排队图片，方便导入后马上看到效果，不用等 cron。"""
         self.ensure_one()
-        processed = self.env['shopify.image.queue']._cron_process_pending(limit=50)
-        raise UserError(f'已处理 {processed} 张图片（还有剩余的会由后台任务每几分钟继续处理）。')
+        Queue = self.env['shopify.image.queue']
+        processed = Queue._cron_process_pending(limit=50)
+        remaining = Queue.search_count([('state', '=', 'pending')])
+        failed = Queue.search_count([('state', '=', 'error')])
+        # 注意：不能用 raise UserError 来显示结果——UserError 会让整个请求事务回滚，
+        # 刚处理完的图片也会跟着被撤销。这里改成返回一个前端通知。
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': '图片同步',
+                'message': f'本次处理 {processed} 张图片；剩余待处理 {remaining} 张，'
+                           f'累计失败 {failed} 张（剩余的会由后台任务每几分钟继续处理）。',
+                'type': 'warning' if failed else 'success',
+                'sticky': False,
+            },
+        }
 
     # =================================================================
     # CSV 读取 / 分组
@@ -110,9 +128,21 @@ class ShopifyImportWizard(models.TransientModel):
     @staticmethod
     def _read_csv_rows(csv_file_b64):
         raw = base64.b64decode(csv_file_b64)
-        # Shopify 导出通常是 UTF-8（可能带 BOM），用 utf-8-sig 兼容两种情况
-        text = raw.decode('utf-8-sig')
-        reader = csv.DictReader(io.StringIO(text))
+        # Shopify 导出通常是 UTF-8（可能带 BOM），用 utf-8-sig 兼容两种情况；
+        # 被 Excel 另存过的文件可能变成 GBK，再兜底试一次。
+        for encoding in ('utf-8-sig', 'gb18030'):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise UserError('无法识别 CSV 文件编码，请用 Shopify 后台原始导出的 UTF-8 文件。')
+        reader = csv.DictReader(io.StringIO(text, newline=''))
+        header = [h.strip() for h in (reader.fieldnames or [])]
+        if 'Handle' not in header:
+            raise UserError('这不是 Shopify 商品导出 CSV：表头里没有 "Handle" 列。')
+        reader.fieldnames = header
         return list(reader)
 
     @staticmethod
@@ -140,24 +170,62 @@ class ShopifyImportWizard(models.TransientModel):
         # 图片行：任何带 Image Src 的行（可能和变体行是同一行）
         image_rows = [r for r in rows if (r.get('Image Src') or '').strip()]
 
+        # Shopify 只在每个商品的第一行写 "Option1 Name" 等属性名，后续变体行只有
+        # "Option1 Value"。所以属性名要从整组行里取，而不能逐行读。
+        option_names = self._option_names(rows)
+        if self._is_default_variant_only(option_names, variant_rows):
+            # 单变体商品（Option1 = Title / Default Title，或者只有一行变体）
+            option_names = []
+
         Template = self.env['product.template']
         tmpl = Template.search([('x_shopify_handle', '=', handle)], limit=1)
         is_new = not tmpl
 
-        vals = self._build_template_vals(main_row, variant_rows)
+        vals = self._build_template_vals(main_row, variant_rows, has_variants=bool(option_names))
 
         if is_new:
             tmpl = Template.create(vals)
         else:
             tmpl.write(vals)
 
-        self._apply_variants(tmpl, variant_rows)
+        warnings = self._apply_variants(tmpl, variant_rows, option_names)
         self._apply_tags(tmpl, main_row)
-        n_images = self._queue_images(tmpl, image_rows, variant_rows)
+        n_images = self._queue_images(tmpl, image_rows, variant_rows, option_names)
 
-        return tmpl, is_new, n_images
+        return tmpl, is_new, n_images, warnings
 
-    def _build_template_vals(self, main_row, variant_rows):
+    @staticmethod
+    def _option_names(rows):
+        """返回 [(列序号, 属性名), ...]，属性名取该列在整组行里第一个非空值。"""
+        names = []
+        for idx, (name_key, _value_key) in enumerate(OPTION_PAIRS):
+            name = next((
+                (r.get(name_key) or '').strip() for r in rows if (r.get(name_key) or '').strip()
+            ), '')
+            if name:
+                names.append((idx, name))
+        return names
+
+    @staticmethod
+    def _is_default_variant_only(option_names, variant_rows):
+        if len(variant_rows) <= 1:
+            return True
+        if len(option_names) == 1 and option_names[0][1] == 'Title':
+            values = {(r.get(OPTION_PAIRS[0][1]) or '').strip() for r in variant_rows}
+            return values <= {'Default Title', ''}
+        return False
+
+    @staticmethod
+    def _row_combo(row, option_names):
+        """这一行对应的属性组合：{属性名: 属性值}（空值的属性不计入）。"""
+        combo = {}
+        for idx, attr_name in option_names:
+            value = (row.get(OPTION_PAIRS[idx][1]) or '').strip()
+            if value:
+                combo[attr_name] = value
+        return combo
+
+    def _build_template_vals(self, main_row, variant_rows, has_variants=False):
         tmpl_fields = self.env['product.template']._fields
         vals = {
             'x_shopify_handle': main_row.get('Handle', '').strip(),
@@ -197,8 +265,9 @@ class ShopifyImportWizard(models.TransientModel):
         if internal_categ:
             vals['categ_id'] = internal_categ.id
 
-        # 单变体商品（占绝大多数）：价格/成本/SKU/条码/重量直接写模板
-        if len(variant_rows) <= 1:
+        # 单变体商品（占绝大多数）：价格/成本/SKU/条码/重量直接写模板；
+        # 多变体商品的价格在 _apply_variants 里按"基础价 + 属性加价"写入。
+        if not has_variants:
             row = variant_rows[0] if variant_rows else main_row
             self._apply_price_fields(vals, row, tmpl_fields)
 
@@ -293,8 +362,13 @@ class ShopifyImportWizard(models.TransientModel):
     # =================================================================
     # 变体 / 属性
     # =================================================================
-    def _apply_variants(self, tmpl, variant_rows):
-        if len(variant_rows) <= 1:
+    def _apply_variants(self, tmpl, variant_rows, option_names):
+        """建属性/属性值/属性行，生成变体，并把每行的价格等写到对应变体上。
+
+        返回需要写进导入日志的警告列表。
+        """
+        warnings = []
+        if not option_names:
             # 单变体：价格等已经在 _build_template_vals 里写过模板了，
             # 但 SKU/条码在多公司/多变体场景下 Odoo 是写在 product.product 上的，
             # 这里再兜底写一次到隐式变体，保证生效。
@@ -310,23 +384,25 @@ class ShopifyImportWizard(models.TransientModel):
                     v_vals['barcode'] = barcode
                 if v_vals:
                     variant.write(v_vals)
-            return
+            return warnings
 
         Attribute = self.env['product.attribute']
         AttrValue = self.env['product.attribute.value']
         AttrLine = self.env['product.template.attribute.line']
 
-        # 收集这个商品所有出现过的属性名/属性值
-        attr_values_map = OrderedDict()
+        # 收集这个商品所有出现过的属性值（按 CSV 里出现的顺序）
+        attr_values_map = OrderedDict((name, OrderedDict()) for _, name in option_names)
         for row in variant_rows:
-            for name_key, value_key in OPTION_PAIRS:
-                name = (row.get(name_key) or '').strip()
-                value = (row.get(value_key) or '').strip()
-                if name and value:
-                    attr_values_map.setdefault(name, OrderedDict())[value] = True
+            for attr_name, value in self._row_combo(row, option_names).items():
+                attr_values_map[attr_name][value] = True
 
         for attr_name, values in attr_values_map.items():
-            attribute = Attribute.search([('name', '=', attr_name)], limit=1)
+            if not values:
+                continue
+            # 只复用"会生成变体"的同名属性；同名但 create_variant 不同的属性
+            # （比如后台手工建的"仅显示"属性）不能拿来生成变体
+            attribute = Attribute.search(
+                [('name', '=', attr_name), ('create_variant', '=', 'always')], limit=1)
             if not attribute:
                 attribute = Attribute.create({
                     'name': attr_name,
@@ -345,8 +421,9 @@ class ShopifyImportWizard(models.TransientModel):
                 ('attribute_id', '=', attribute.id),
             ], limit=1)
             if line:
-                merged = list(set(line.value_ids.ids) | set(value_ids))
-                line.write({'value_ids': [(6, 0, merged)]})
+                missing = [vid for vid in value_ids if vid not in line.value_ids.ids]
+                if missing:
+                    line.write({'value_ids': [(4, vid) for vid in missing]})
             else:
                 AttrLine.create({
                     'product_tmpl_id': tmpl.id,
@@ -359,28 +436,24 @@ class ShopifyImportWizard(models.TransientModel):
         create_variants = getattr(tmpl, '_create_variant_ids', None)
         if callable(create_variants):
             create_variants()
+        tmpl.invalidate_recordset(['product_variant_ids'])
 
-        # 把每一行的价格/成本/SKU/条码/重量按属性值组合写到对应变体
+        warnings += self._apply_variant_prices(tmpl, variant_rows, option_names)
+
+        # 把每一行的成本/SKU/条码/重量按属性值组合写到对应变体
         for row in variant_rows:
-            combo_values = [
-                (row.get(value_key) or '').strip()
-                for _, value_key in OPTION_PAIRS
-                if (row.get(value_key) or '').strip()
-            ]
-            if not combo_values:
+            combo = self._row_combo(row, option_names)
+            if not combo:
                 continue
-            variant = self._find_variant_by_values(tmpl, combo_values)
+            variant = self._find_variant(tmpl, combo)
             if not variant:
                 _logger.warning(
                     '找不到匹配的变体，跳过该行: handle=%s combo=%s',
-                    tmpl.x_shopify_handle, combo_values)
+                    tmpl.x_shopify_handle, combo)
+                warnings.append(f'找不到属性组合 {combo} 对应的变体，该行已跳过')
                 continue
 
             v_vals = {}
-            price = self._to_float(row.get('Variant Price'))
-            if price is not None:
-                # 写 lst_price 会被 Odoo 自动换算成相对模板价格的 price_extra
-                v_vals['lst_price'] = price
             cost = self._to_float(row.get('Cost per item'))
             if cost is not None:
                 v_vals['standard_price'] = cost
@@ -396,23 +469,80 @@ class ShopifyImportWizard(models.TransientModel):
 
             if v_vals:
                 variant.write(v_vals)
+        return warnings
+
+    def _apply_variant_prices(self, tmpl, variant_rows, option_names):
+        """把 Shopify 每个变体的售价换算成 Odoo 的"模板基础价 + 属性值加价"。
+
+        Odoo 标准版没有"每个变体独立售价"：变体价 = 模板 list_price +
+        所选属性值 price_extra 之和（直接写 product.product.lst_price 其实会
+        改掉模板价格，所有变体一起变）。所以这里：
+          - 模板 list_price = 所有变体里的最低价
+          - 按属性顺序逐个求出每个属性值的加价（取该值出现的各行里"剩余差价"的最小值）
+          - 最后逐行校验；Shopify 价格表无法拆成"加法"形式（比如只有某一个组合
+            单独加价）时，写入最接近的结果并在导入日志里给出警告
+        """
+        precision = self.env['decimal.precision'].precision_get('Product Price')
+        priced = []
+        for row in variant_rows:
+            price = self._to_float(row.get('Variant Price'))
+            combo = self._row_combo(row, option_names)
+            if price is not None and combo:
+                priced.append((combo, price))
+        if not priced:
+            return []
+
+        base = min(p for _, p in priced)
+        tmpl.write({'list_price': base})
+
+        extras = {}  # (属性名, 属性值) -> 加价
+        done_attrs = set()
+        for _idx, attr_name in option_names:
+            for combo, price in priced:
+                value = combo.get(attr_name)
+                if value is None:
+                    continue
+                # 只扣掉"前面已经算完的属性"的加价
+                assigned = sum(
+                    extras.get((a, v), 0.0) for a, v in combo.items() if a in done_attrs)
+                remaining = float_round(price - base - assigned, precision_digits=precision)
+                key = (attr_name, value)
+                extras[key] = min(extras.get(key, remaining), remaining)
+            done_attrs.add(attr_name)
+
+        ptavs = tmpl.valid_product_template_attribute_line_ids.product_template_value_ids
+        for ptav in ptavs:
+            key = (ptav.attribute_id.name, ptav.product_attribute_value_id.name)
+            if key in extras and float_compare(
+                    ptav.price_extra, extras[key], precision_digits=precision):
+                ptav.price_extra = extras[key]
+
+        warnings = []
+        for combo, price in priced:
+            computed = base + sum(extras.get((a, v), 0.0) for a, v in combo.items())
+            if float_compare(computed, price, precision_digits=precision):
+                warnings.append(
+                    f'变体 {combo} 在 Shopify 的价格是 {price}，但 Odoo 只能按'
+                    f'"基础价 + 属性加价"计算，实际为 {computed}，请在后台手动调整')
+        return warnings
 
     @staticmethod
-    def _find_variant_by_values(tmpl, value_names):
-        wanted = set(value_names)
+    def _find_variant(tmpl, combo):
+        """按 {属性名: 属性值} 精确匹配变体（属性名 + 值一起比较，避免不同属性同名值串号）。"""
+        wanted = set(combo.items())
         for variant in tmpl.product_variant_ids:
-            names = set(
-                variant.product_template_attribute_value_ids
-                .mapped('product_attribute_value_id.name')
-            )
-            if wanted <= names:
+            have = {
+                (ptav.attribute_id.name, ptav.product_attribute_value_id.name)
+                for ptav in variant.product_template_attribute_value_ids
+            }
+            if wanted <= have:
                 return variant
         return tmpl.env['product.product']
 
     # =================================================================
     # 图片排队
     # =================================================================
-    def _queue_images(self, tmpl, image_rows, variant_rows):
+    def _queue_images(self, tmpl, image_rows, variant_rows, option_names):
         Queue = self.env['shopify.image.queue']
         existing_urls = set(
             Queue.search([('product_tmpl_id', '=', tmpl.id)]).mapped('source_url')
@@ -446,14 +576,10 @@ class ShopifyImportWizard(models.TransientModel):
             v_url = (row.get('Variant Image') or '').strip()
             if not v_url or v_url in existing_urls:
                 continue
-            combo_values = [
-                (row.get(value_key) or '').strip()
-                for _, value_key in OPTION_PAIRS
-                if (row.get(value_key) or '').strip()
-            ]
+            combo = self._row_combo(row, option_names)
             variant = (
-                self._find_variant_by_values(tmpl, combo_values)
-                if combo_values else tmpl.product_variant_ids[:1]
+                self._find_variant(tmpl, combo)
+                if combo else tmpl.product_variant_ids[:1]
             )
             if not variant:
                 continue

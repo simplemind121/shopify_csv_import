@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.1.0.0`](./CHANGELOG.md#19010---2026-09-30) |
+| **Latest version** | [`19.0.1.0.1`](./CHANGELOG.md#19011---2026-09-30) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -59,14 +59,18 @@ images, but works standalone with plain Odoo binary images too.
 | `VERSION` | Single-line current recommended version |
 | `CHANGELOG.md` | User-facing change history |
 | `docs/` | Deploy & operational notes |
+| `shopify_csv_import/tests/` | Odoo test suite + a sample Shopify CSV export |
+| `dev/run_tests.sh` | Runs the test suite on a throwaway Odoo 19 database |
+| `dev/stub_addons/media_picker/` | Test double of `media_picker`'s API — **dev/CI only, never deploy** |
 
 ---
 
-## Feature matrix (current: 19.0.1.0.0)
+## Feature matrix (current: 19.0.1.0.1)
 
 | Area | Status |
 |---|---|
 | Product / variant / price / cost / SKU / barcode / weight import | Supported |
+| Per-variant prices | Supported as Odoo *base price + attribute extra*; grids that can't be expressed that way are flagged in the import log |
 | Multi-level website + internal category mapping | Supported |
 | Vendor → brand tag (URL-junk filtered) + Shopify Tags → tags | Supported |
 | Idempotent re-import (dedup by Handle) | Supported |
@@ -75,6 +79,7 @@ images, but works standalone with plain Odoo binary images too.
 | Alist/B2 CDN image sync via `media_picker`'s `media.bind` | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
 | Chunked commits for very large catalogs | Not yet |
+| Automated tests on a real Odoo 19 DB | Yes — 26 tests, see below |
 
 ---
 
@@ -82,7 +87,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.1.0.0.zip
+#    shopify_csv_import-19.0.1.0.1.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS
@@ -114,6 +119,26 @@ Full procedure, options, and rollback: **[docs/DEPLOY.md](./docs/DEPLOY.md)**.
 
 No QWeb template overrides live in this module — the storefront gallery
 display is entirely `media_picker`'s own, already-verified code.
+
+---
+
+## Running the tests
+
+```bash
+./dev/run_tests.sh                 # Docker: throwaway postgres:16 + odoo:19.0
+```
+
+No Docker Hub access? Point it at a local Odoo 19 source checkout instead:
+
+```bash
+ODOO_SRC=~/src/odoo-19 PYTHON=~/venvs/odoo19/bin/python \
+DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=odoo DB_PASSWORD=odoo ./dev/run_tests.sh
+```
+
+The suite installs the module next to `dev/stub_addons/media_picker` (a test
+double; set `MEDIA_PICKER_DIR=/path/to/media_picker` to test against the real
+addon) and mocks all network calls (Shopify image downloads, Alist upload,
+`get_file`). The same script runs in GitHub Actions on every push / PR.
 
 ---
 

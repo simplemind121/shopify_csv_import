@@ -2,6 +2,65 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.1.0.1] - 2026-09-30
+
+First version verified end-to-end on a real Odoo 19.0 database (see
+`dev/run_tests.sh`). 19.0.1.0.0 **could not be installed on Odoo 19** and
+mis-imported every multi-variant product; upgrade directly to this version.
+
+### Fixed
+
+- **Install failure on Odoo 19**: the image-queue search view used
+  `<group expand="0" string="...">`, which Odoo 19's view schema rejects
+  (`Invalid view shopify.image.queue.search definition`).
+- **Install failure on Odoo 19**: `data/ir_cron.xml` set `numbercall`, a field
+  that no longer exists on `ir.cron`.
+- **Multi-variant products collapsed into a single variant**: Shopify only
+  writes `Option1/2/3 Name` on a product's first row; follow-up variant rows
+  carry only the values. Option names are now taken from the whole row group,
+  so e.g. a Color × Size product gets all 4 variants instead of 1.
+- **Per-variant prices were never applied**: writing `product.product.lst_price`
+  in Odoo just rewrites the template's `list_price` (every variant ends up with
+  the last row's price). Prices are now mapped to Odoo's pricing model:
+  template `list_price` = lowest variant price, the rest as
+  `product.template.attribute.value.price_extra`. Price grids that can't be
+  expressed that way (one combination priced independently) are imported as
+  closely as possible and flagged with a `[警告]` line in the import log.
+- **Variant images silently dropped** (consequence of the variant bug above);
+  variant-specific images are now attached to the variant only, not duplicated
+  into the shared product gallery.
+- **"立即同步一批图片" undid its own work**: it reported the result by raising
+  `UserError`, which rolls back the transaction, including the images it had
+  just processed. It now returns a notification instead.
+- **Queue "重试" button could skip the selected record**: it processed the
+  first *N* pending rows by id instead of the rows you selected.
+- A database error while storing one image (e.g. a corrupt file failing Odoo's
+  image validation) could abort the whole cron batch; each image now runs in
+  its own savepoint.
+- Variant attributes: an existing same-name attribute with
+  `create_variant != 'always'` is no longer reused (it can't generate variants).
+- Deploy script: the package manifest lookup is pinned to
+  `shopify_csv_import/__manifest__.py`, so passing the repo bundle
+  (`shopify_csv_import-repo-bundle.tar.gz`, which matches the package glob) can
+  never pick up another module's manifest.
+- Manifest description: fixed an RST list formatting warning.
+
+### Added
+
+- CSV import hardening: clear error if the file has no `Handle` column (not a
+  Shopify export); GB18030 fallback for exports re-saved by Excel.
+- Downloaded image URLs that return a non-image `Content-Type` (e.g. an
+  expired Shopify link returning HTML) now fail with a clear message.
+- **Automated test suite** (`shopify_csv_import/tests/`, 26 tests) running on a
+  real Odoo 19 database: CSV parsing, single/multi-variant import, price
+  mapping, categories, tags/vendor filtering, idempotent re-import, per-product
+  error isolation, the image queue (binary fallback, error handling, retry), and
+  the Alist/`media_picker` path (upload, trusted-domain check, `media.bind`
+  de-dup, fallbacks) with the network mocked.
+- `dev/run_tests.sh` (Docker `odoo:19.0` or a local Odoo source checkout),
+  `dev/stub_addons/media_picker` (a test double of the private `media_picker`
+  API, **dev/CI only**), and a GitHub Actions workflow.
+
 ## [19.0.1.0.0] - 2026-09-30
 
 ### Added

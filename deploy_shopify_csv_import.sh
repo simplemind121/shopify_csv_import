@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# shopify_csv_import 一键部署脚本 (v1.0 — 适配 19.0.1.0.0)
+# shopify_csv_import 一键部署脚本 (v1.1 — 适配 19.0.1.0.0 及以上)
 #
 # 用法（本脚本和 shopify_csv_import*.zip / .tar.gz 放在同一目录）：
 #   sudo bash deploy_shopify_csv_import.sh                   # 部署到生产 (prod-odoo)
@@ -134,7 +134,9 @@ if [ "$MODE" = "deploy" ]; then
     *.tar.gz|*.tgz) tar -xzf "$PKG" -C "$TMP_EXTRACT" ;;
     *) err "不认识的包格式：$PKG"; exit 1 ;;
   esac
-  MANIFEST_PATH=$(find "$TMP_EXTRACT" -maxdepth 4 -type f -name "__manifest__.py" | head -n1 || true)
+  # 只认 shopify_csv_import/__manifest__.py：传进来的如果是整个仓库的打包
+  # （里面还有 dev/stub_addons/media_picker 测试替身），不能误拿别的模块的 manifest
+  MANIFEST_PATH=$(find "$TMP_EXTRACT" -maxdepth 4 -type f -path "*/${MODULE}/__manifest__.py" | head -n1 || true)
   if [ -z "$MANIFEST_PATH" ]; then
     err "解压后没找到 __manifest__.py（可能传错文件），解压内容："
     find "$TMP_EXTRACT" -maxdepth 2 | sed 's/^/  /'

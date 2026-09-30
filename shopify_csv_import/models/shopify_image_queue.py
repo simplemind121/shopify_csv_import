@@ -58,10 +58,12 @@ class ShopifyImageQueue(models.Model):
         return len(records)
 
     def action_retry(self):
+        # 只重试选中的这几条（以前是按 id 顺序处理"任意 N 条待处理"，
+        # 队列里还有别的待处理记录时，选中的那条可能根本没被处理）
+        self.write({'state': 'pending', 'error_message': False})
         for rec in self:
-            rec.state = 'pending'
-            rec.error_message = False
-        self._cron_process_pending(limit=len(self))
+            rec._process()
+        return True
 
     # ---------------------------------------------------------------
     # 核心处理逻辑
@@ -69,39 +71,47 @@ class ShopifyImageQueue(models.Model):
     def _process(self):
         self.ensure_one()
         try:
-            content = self._download(self.source_url)
-            if not content:
-                raise ValueError('下载失败或返回空内容')
-
-            cdn_url = False
-            if self.media_source_id:
-                try:
-                    cdn_url = self._upload_and_resolve(content)
-                except Exception:
-                    # Alist 上传/解析失败：记录日志，直接走本地二进制兜底，
-                    # 不让图片同步整体失败。
-                    _logger.info(
-                        'Alist 上传/解析失败，改用本地二进制存储: %s',
-                        self.source_url, exc_info=True,
-                    )
-                    cdn_url = False
-
-            if cdn_url:
-                self._save_via_media_bind(cdn_url)
-            else:
-                self._save_binary(content)
-
+            # savepoint：写图片时如果触发数据库错误（例如图片字段校验失败），
+            # 只回滚这一张图，事务还能继续把 state=error 写进去、处理下一张。
+            with self.env.cr.savepoint():
+                self._process_one()
             self.write({'state': 'done', 'error_message': False})
         except Exception as e:
             _logger.exception('图片同步失败: %s', self.source_url)
             self.write({'state': 'error', 'error_message': str(e)[:250]})
+
+    def _process_one(self):
+        content = self._download(self.source_url)
+        if not content:
+            raise ValueError('下载失败或返回空内容')
+
+        cdn_url = False
+        if self.media_source_id:
+            try:
+                cdn_url = self._upload_and_resolve(content)
+            except Exception:
+                # Alist 上传/解析失败：记录日志，直接走本地二进制兜底，
+                # 不让图片同步整体失败。
+                _logger.info(
+                    'Alist 上传/解析失败，改用本地二进制存储: %s',
+                    self.source_url, exc_info=True,
+                )
+                cdn_url = False
+
+        if cdn_url:
+            self._save_via_media_bind(cdn_url)
+        else:
+            self._save_binary(content)
 
     # ---------------------------------------------------------------
     # 方案 A：本地二进制兜底（不依赖 media_picker）
     # ---------------------------------------------------------------
     def _save_binary(self, content):
         b64 = base64.b64encode(content)
-        if self.role == 'main':
+        if self.product_variant_id:
+            # 变体专属图片只挂到该变体上，不再额外塞进商品公共画廊
+            self.product_variant_id.image_1920 = b64
+        elif self.role == 'main':
             self.product_tmpl_id.image_1920 = b64
         else:
             self.env['product.image'].create({
@@ -109,8 +119,6 @@ class ShopifyImageQueue(models.Model):
                 'name': self.product_tmpl_id.name,
                 'image_1920': b64,
             })
-        if self.product_variant_id:
-            self.product_variant_id.image_1920 = b64
 
     # ---------------------------------------------------------------
     # 方案 B：转存 Alist，走 media_picker 的 media.bind 外链画廊
@@ -175,6 +183,9 @@ class ShopifyImageQueue(models.Model):
             raise RuntimeError('服务器缺少 requests 库，无法下载图片')
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
+        content_type = (resp.headers.get('Content-Type') or '').lower()
+        if content_type and not content_type.startswith(('image/', 'application/octet-stream')):
+            raise ValueError(f'下载到的不是图片（Content-Type: {content_type}）')
         return resp.content
 
     @staticmethod

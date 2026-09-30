@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  odoo-19:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static checks (py_compile + XML well-formedness)
+        run: |
+          python3 -m py_compile $(find shopify_csv_import -name '*.py')
+          for f in $(find shopify_csv_import -name '*.xml'); do
+            python3 -c "import sys, xml.dom.minidom as m; m.parse(sys.argv[1])" "$f"
+          done
+          bash -n deploy_shopify_csv_import.sh
+
+      - name: Odoo 19 test suite
+        run: ./dev/run_tests.sh
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odoo-test-log
+          path: dev/test.log

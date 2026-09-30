@@ -1,0 +1,15 @@
+﻿Handle,Title,Body (HTML),Vendor,Product Category,Type,Tags,Published,Option1 Name,Option1 Value,Option1 Linked To,Option2 Name,Option2 Value,Option2 Linked To,Option3 Name,Option3 Value,Option3 Linked To,Variant SKU,Variant Grams,Variant Inventory Tracker,Variant Inventory Qty,Variant Inventory Policy,Variant Fulfillment Service,Variant Price,Variant Compare At Price,Variant Requires Shipping,Variant Taxable,Variant Barcode,Image Src,Image Position,Image Alt Text,Gift Card,SEO Title,SEO Description,Variant Image,Variant Weight Unit,Variant Tax Code,Cost per item,Status
+sci-test-mug,SCI Test Ceramic Mug,<p>Nice mug</p>,Acme Home,Home & Garden > Kitchen & Dining > Drinkware,,"mug, kitchen",TRUE,Title,Default Title,,,,,,,,SCI-MUG-01,350,,,,,12.50,,,,SCI0000000011,https://cdn.shopify.com/s/files/1/0000/0001/products/mug-1.jpg?v=1,1,,,Mug SEO,,,,,4.20,active
+sci-test-mug,,,,,,,,,,,,,,,,,,,,,,,,,,,,https://cdn.shopify.com/s/files/1/0000/0001/products/mug-2.jpg?v=1,2,,,,,,,,,
+sci-test-tee,SCI Test Tee,<p>Tee</p>,Acme Apparel,Apparel & Accessories > Clothing,,tee,TRUE,SCI Color,Red,,SCI Size,S,,,,,SCI-TEE-RS,200,,,,,10.00,,,,SCI000000020,https://cdn.shopify.com/s/files/1/0000/0001/products/tee-1.jpg,1,,,,,,,,3.00,active
+sci-test-tee,,,,,,,,,Red,,,M,,,,,SCI-TEE-RM,200,,,,,12.00,,,,SCI000000021,,,,,,,,,,3.00,
+sci-test-tee,,,,,,,,,Blue,,,S,,,,,SCI-TEE-BS,200,,,,,11.00,,,,SCI000000022,,,,,,,,,,3.00,
+sci-test-tee,,,,,,,,,Blue,,,M,,,,,SCI-TEE-BM,200,,,,,13.00,,,,SCI000000023,,,,,,,https://cdn.shopify.com/s/files/1/0000/0001/products/tee-blue.jpg,,,3.00,
+sci-test-tee,,,,,,,,,,,,,,,,,,,,,,,,,,,,https://cdn.shopify.com/s/files/1/0000/0001/products/tee-2.jpg,2,,,,,,,,,
+sci-test-cap,SCI Test Cap,,https://detail.1688.com/offer/123.html,,,,FALSE,SCI Size,S,,,,,,,,SCI-CAP-S,,,,,,20,,,,,,,,,,,,,,,draft
+sci-test-cap,,,,,,,,,M,,,,,,,,SCI-CAP-M,,,,,,20,,,,,,,,,,,,,,,
+sci-test-cap,,,,,,,,,L,,,,,,,,SCI-CAP-L,,,,,,25,,,,,,,,,,,,,,,
+sci-test-hoodie,SCI Test Hoodie,,,,,,TRUE,SCI Color,Red,,SCI Size,S,,,,,,,,,,,10,,,,,,,,,,,,,,,
+sci-test-hoodie,,,,,,,,,Red,,,M,,,,,,,,,,,12,,,,,,,,,,,,,,,
+sci-test-hoodie,,,,,,,,,Blue,,,S,,,,,,,,,,,11,,,,,,,,,,,,,,,
+sci-test-hoodie,,,,,,,,,Blue,,,M,,,,,,,,,,,20,,,,,,,,,,,,,,,

@@ -71,9 +71,9 @@ website_sale 自建商城。
 | Product Category | 按 `>` 拆分层级，自动建/复用 `product.public.category`（网站分类）+ `product.category`（内部分类） |
 | Published | `website_published` |
 | Status | `x_shopify_status`（仅记录，不影响上架逻辑） |
-| Option1/2/3 Name+Value | 自动建/复用 `product.attribute` + `product.attribute.value`，生成变体 |
+| Option1/2/3 Name+Value | 属性名取该商品第一行（Shopify 只在第一行写 Name），自动建/复用 `product.attribute`（仅复用"生成变体"类型的同名属性）+ `product.attribute.value`，生成变体 |
 | Variant SKU | `default_code` |
-| Variant Price | `list_price`（单变体）/ `lst_price`（多变体，按组合写到对应 `product.product`） |
+| Variant Price | `list_price`（单变体）；多变体：模板 `list_price` = 最低价，其余差价写成属性值加价 `price_extra`（Odoo 标准的变体定价方式）。Shopify 里只有某一个组合单独加价、无法拆成"属性加价"的，会按最接近的结果导入并在导入日志里标 `[警告]` |
 | Variant Compare At Price | 未使用（按你的要求跳过） |
 | Cost per item | `standard_price` |
 | Variant Barcode | `barcode` |
@@ -82,6 +82,13 @@ website_sale 自建商城。
 | Variant Image | 少量有值的会挂到对应变体 |
 | Tags | `product.tag`（和 Vendor 一起，脏数据也原样导入，你说了自己后台清理） |
 | Gift Card / SEO Description / Google Shopping / 各类 metafields | 未使用（数据基本为空，用不上） |
+
+## 测试
+
+仓库根目录执行 `./dev/run_tests.sh`，会在一个临时 Odoo 19 数据库里跑
+`tests/` 下的 26 个用例（CSV 解析、单/多变体、价格换算、分类、标签、重复导入、
+单个商品失败隔离、图片队列、Alist/media_picker 链路，网络全部 mock）。
+详见仓库根目录 README 的「运行测试」一节。
 
 ## 已知限制 / 后续可以优化的点
 

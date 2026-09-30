@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Shopify CSV 商品导入',
-    'version': '19.0.1.0.0',
+    'version': '19.0.1.0.1',
     'category': 'Sales/Sales',
     'summary': '将 Shopify 导出的商品 CSV 一键导入到 Odoo 网站商城',
     'description': """
@@ -24,6 +24,7 @@ website_sale（自建商城）：
   会自动走 CDN 直链显示
 
 使用方法：
+
 1. 安装本模块
 2. 顶部菜单「Shopify 导入」→「导入商品 CSV」，上传 Shopify 导出的 products_export.csv
 3. 点击「开始导入」，商品/变体/分类/标签会立即建好

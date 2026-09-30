@@ -51,7 +51,8 @@
                 <filter name="pending" string="待处理" domain="[('state', '=', 'pending')]"/>
                 <filter name="error" string="失败" domain="[('state', '=', 'error')]"/>
                 <filter name="done" string="已完成" domain="[('state', '=', 'done')]"/>
-                <group expand="0" string="分组">
+                <separator/>
+                <group>
                     <filter name="group_state" string="按状态" context="{'group_by': 'state'}"/>
                     <filter name="group_product" string="按商品" context="{'group_by': 'product_tmpl_id'}"/>
                 </group>
