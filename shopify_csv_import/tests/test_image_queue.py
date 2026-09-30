@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from unittest.mock import patch
+from unittest.mock import call, patch
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from odoo.tests import tagged
 from odoo.tools import mute_logger
@@ -7,6 +8,14 @@ from odoo.tools import mute_logger
 from .common import ShopifyImportCase, fake_response, png_bytes
 
 QUEUE_MODULE = 'odoo.addons.shopify_csv_import.models.shopify_image_queue'
+
+
+def strip_resize(url):
+    """把 _download 自动加上的 Shopify 缩放参数去掉，方便按原始 URL 设置 mock。"""
+    parts = urlparse(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k not in ('width', 'height')]
+    return urlunparse(parts._replace(query=urlencode(query)))
 ALIST_CLIENT = 'odoo.addons.media_picker.models.pem_alist_client.get_file'
 
 
@@ -21,7 +30,7 @@ class TestShopifyImageQueue(ShopifyImportCase):
         url_map = url_map or {}
         default = default or fake_response(self.png)
         return patch(f'{QUEUE_MODULE}.requests.get',
-                     side_effect=lambda url, **kw: url_map.get(url, default))
+                     side_effect=lambda url, **kw: url_map.get(strip_resize(url), default))
 
     def test_01_binary_fallback(self):
         self._run_import()
@@ -165,7 +174,98 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertTrue(mug.image_1920)
         self.assertFalse(mug.use_external_media)
 
-    def test_10_cron_record_exists(self):
+    def test_10_variant_bind_does_not_overwrite_gallery_bind(self):
+        source = self._alist_source()
+        img = 'https://cdn.shopify.com/s/files/1/x/black.jpg'
+        self._run_import(self._csv(
+            f'vb-bag,Bag,,,,,TRUE,Color,Black,,,VB-B,,10,,{img},1,{img},,active',
+            'vb-bag,,,,,,,,White,,,VB-W,,10,,,,,,',
+        ), media_source_id=source.id)
+        bag = self._tmpl('vb-bag')
+        rows = self.Queue.search([('product_tmpl_id', '=', bag.id)], order='id')
+        self.assertEqual(len(rows), 2)
+        put_resp = fake_response(json_data={'code': 200})
+        with self._mock_get(), \
+                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
+                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/black.jpg'}):
+            for rec in rows:
+                rec._process()
+        binds = self.env['media.bind'].search([('product_tmpl_id', '=', bag.id)])
+        self.assertEqual(len(binds), 2)
+        gallery = binds.filtered(lambda b: not b.product_variant_id)
+        self.assertTrue(gallery.is_main)
+        self.assertEqual(binds.filtered('product_variant_id').product_variant_id,
+                         self._variant(bag, {'Color': 'Black'}))
+
+    # ------------------------------------------------------------------
+    # 下载 / 批处理
+    # ------------------------------------------------------------------
+    def test_11_shopify_resized_url(self):
+        Queue = type(self.Queue)
+        url = 'https://cdn.shopify.com/s/files/1/0889/files/a.jpg?v=1771441417'
+        resized = Queue._shopify_resized_url(url)
+        self.assertEqual(
+            resized, 'https://cdn.shopify.com/s/files/1/0889/files/a.jpg?v=1771441417&width=1920&height=1920')
+        self.assertEqual(
+            Queue._shopify_resized_url('https://cdn.shopify.com/a.jpg?width=100&v=2'),
+            'https://cdn.shopify.com/a.jpg?v=2&width=1920&height=1920')
+        other = 'https://img.example.com/a.jpg?v=1'
+        self.assertEqual(Queue._shopify_resized_url(other), other)
+
+    def test_12_resized_download_falls_back_to_original(self):
+        self._run_import()
+        rec = self.Queue.search([], order='id', limit=1)
+        calls = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            return fake_response(status=404) if 'width=' in url else fake_response(self.png)
+        with patch(f'{QUEUE_MODULE}.requests.get', side_effect=fake_get):
+            rec._process()
+        self.assertEqual(rec.state, 'done', rec.error_message)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('width=1920', calls[0])
+        self.assertEqual(calls[1], rec.source_url)
+
+    def test_13_cron_commits_progress_per_image(self):
+        self._run_import()
+        IrCron = type(self.env['ir.cron'])
+        with self._mock_get(), \
+                patch.object(IrCron, '_commit_progress', autospec=True, return_value=100.0) as progress:
+            processed = self.Queue.with_context(cron_id=1)._cron_process_pending(limit=3)
+        self.assertEqual(processed, 3)
+        args = [c.args[1:] + tuple(sorted(c.kwargs.items())) for c in progress.call_args_list]
+        # 先报告剩余总数（5 张待处理），再每张图提交一次
+        self.assertEqual(args, [(('remaining', 5),), (1,), (1,), (1,)])
+        self.assertEqual(self.Queue.search_count([('state', '=', 'pending')]), 2)
+
+    def test_14_time_budget_stops_batch(self):
+        self._run_import()
+        with self._mock_get(), \
+                patch(f'{QUEUE_MODULE}.DOWNLOAD_WORKERS', 2), \
+                patch.object(type(self.Queue), '_time_budget', return_value=0):
+            processed = self.Queue._cron_process_pending(limit=30)
+        # 预算用完后不再开始新的一组，但至少处理完第一组，保证队列一定往前走
+        self.assertEqual(processed, 2)
+
+    def test_14b_parallel_prefetch_downloads_each_image_once(self):
+        self._run_import()
+        with self._mock_get() as get:
+            processed = self.Queue._cron_process_pending(limit=30)
+        self.assertEqual(processed, 5)
+        self.assertEqual(get.call_count, 5)
+        self.assertEqual(set(self.Queue.search([]).mapped('state')), {'done'})
+
+    def test_15_cron_job_budget_exhausted_reports_done(self):
+        self._run_import()
+        IrCron = type(self.env['ir.cron'])
+        with patch.object(IrCron, '_commit_progress', autospec=True, return_value=0.0) as progress, \
+                patch.object(type(self.Queue), '_cron_job_deadline', return_value=0.0):
+            processed = self.Queue.with_context(cron_id=1)._cron_process_pending(limit=30)
+        self.assertEqual(processed, 0)
+        self.assertEqual(progress.call_args, call(self.env['ir.cron'], remaining=0))
+
+    def test_16_cron_record_exists(self):
         cron = self.env.ref('shopify_csv_import.ir_cron_shopify_image_sync')
         self.assertTrue(cron.active)
-        self.assertEqual((cron.interval_number, cron.interval_type), (2, 'minutes'))
+        self.assertEqual((cron.interval_number, cron.interval_type), (1, 'minutes'))

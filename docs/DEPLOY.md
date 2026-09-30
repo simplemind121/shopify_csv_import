@@ -29,7 +29,7 @@ Other options:
 ```bash
 sudo ./deploy_shopify_csv_import.sh --container my-odoo   # explicit container name
 sudo ./deploy_shopify_csv_import.sh --db mydb              # explicit database
-sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.1.0.1.zip
+sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.1.0.2.zip
 sudo ./deploy_shopify_csv_import.sh --force                # allow same/older-version reinstall
 sudo ./deploy_shopify_csv_import.sh --no-backup            # skip pre-deploy backup (not recommended)
 sudo ./deploy_shopify_csv_import.sh --rollback              # restore the most recent backup
@@ -55,7 +55,7 @@ The script:
 
 ## Post-deploy checklist
 
-1. Apps → `shopify_csv_import` version = **19.0.1.0.1**
+1. Apps → `shopify_csv_import` version = **19.0.1.0.2**
 2. Top menu → "Shopify 导入" → "导入商品 CSV" is visible (admin only)
 3. Import a small test CSV (a handful of products) without selecting an Alist
    image source first — confirm products/variants/categories/tags appear
@@ -81,7 +81,12 @@ confirm, since this overwrites everything written since that backup.
 - This module stores no credentials of its own. The Alist connection used
   for CDN image sync is whichever `product.media.source` record you pick in
   the import wizard — manage its URL/token through `media_picker`'s own UI.
-- `ir.cron` "Shopify 图片同步" runs every 2 minutes, 30 images per batch, by
-  default. Adjust the interval/batch size from Settings → Technical →
-  Scheduled Actions if you're importing a very large catalog and want it to
-  move faster (or slower, to reduce load).
+- `ir.cron` "Shopify 图片同步" starts every minute. Each run downloads 8 images
+  in parallel, commits after every image, and stops starting new images once
+  it has used half of the cron time limit (`limit_time_real_cron`, falling back
+  to `limit_time_real`, 120 s by default) — so a run can't be killed mid-batch
+  and roll its work back. While images remain, Odoo re-runs it straight away
+  (up to 10 rounds per trigger). Measured on a real 284-product / 1,582-image
+  Shopify export: ~40 images/minute, i.e. about 40 minutes for the whole catalog.
+  Shopify CDN images are fetched pre-scaled to 1920 px (Odoo keeps at most
+  1920 px anyway), with a fallback to the original URL.

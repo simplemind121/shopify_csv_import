@@ -201,3 +201,30 @@ class TestShopifyImportWizard(ShopifyImportCase):
         self.Queue.search([]).write({'state': 'done'})
         action = wizard.action_process_images_now()
         self.assertEqual(action['tag'], 'display_notification')
+
+    def test_17_variant_image_reusing_gallery_image(self):
+        """真实 Shopify 导出里 Variant Image 基本都同时是某张 Image Src：
+        画廊里要有这张图，变体上也要挂上它（以前按 URL 去重会把变体关联丢掉）。"""
+        img = 'https://cdn.shopify.com/s/files/1/x/'
+        csv_bytes = self._csv(
+            f'vi-bag,Bag,,,,,TRUE,Color,Black,,,VI-B,,10,,{img}black.jpg,1,{img}black.jpg,,active',
+            f'vi-bag,,,,,,,,White,,,VI-W,,10,,{img}white.jpg,2,{img}white.jpg,,',
+            # 单变体商品上的 Variant Image 没有意义，不单独排队
+            f'vi-one,One,,,,,TRUE,Title,Default Title,,,VI-1,,5,,{img}one.jpg,1,{img}one.jpg,,active',
+        )
+        wizard = self._run_import(csv_bytes)
+        self.assertEqual(wizard.image_queue_count, 5, wizard.import_log)
+        bag = self._tmpl('vi-bag')
+        rows = self.Queue.search([('product_tmpl_id', '=', bag.id)])
+        gallery = rows.filtered(lambda q: not q.product_variant_id)
+        per_variant = rows - gallery
+        self.assertEqual(sorted(gallery.mapped('role')), ['extra', 'main'])
+        self.assertEqual(len(per_variant), 2)
+        white = self._variant(bag, {'Color': 'White'})
+        self.assertEqual(per_variant.filtered(lambda q: q.product_variant_id == white).source_url,
+                         f'{img}white.jpg')
+        one = self._tmpl('vi-one')
+        self.assertFalse(self.Queue.search([('product_tmpl_id', '=', one.id), ('product_variant_id', '!=', False)]))
+
+        # 重复导入不会再排队
+        self.assertEqual(self._run_import(csv_bytes).image_queue_count, 0)

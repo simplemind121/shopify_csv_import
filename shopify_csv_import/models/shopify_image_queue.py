@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
 import base64
 import logging
-from urllib.parse import urlparse
+import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from odoo import api, fields, models
+from odoo.tools import config
 
 _logger = logging.getLogger(__name__)
+
+# Odoo 只保存最大 1920px 的图片（image_1920），Shopify CDN 支持按参数缩放，
+# 直接下缩好的版本：原图常见 1~3MB / 1200~2400 万像素，没必要整张下载。
+SHOPIFY_CDN_HOSTS = ('cdn.shopify.com',)
+SHOPIFY_MAX_PX = 1920
+# 单批图片同步最多占用"cron / 请求超时时间"的这个比例，剩下的留给最后一张图
+# （下载超时 30s + Alist 上传超时 60s）收尾，保证不会被 Odoo 强杀。
+TIME_BUDGET_RATIO = 0.5
+# 同时下载的图片数。下载是纯网络等待（实测 3 秒/张），并行下载能把吞吐量提高好几倍；
+# 线程里只做 HTTP 请求，所有数据库写入仍然在主线程里逐张进行。
+DOWNLOAD_WORKERS = 8
 
 try:
     import requests
@@ -52,10 +66,88 @@ class ShopifyImageQueue(models.Model):
     # ---------------------------------------------------------------
     @api.model
     def _cron_process_pending(self, limit=30):
+        """处理一批待同步图片，返回本次处理的张数。
+
+        - 在 cron 里运行时，每处理完一张就用 ir.cron._commit_progress 提交一次：
+          一张图平均要几秒（实测从 Shopify CDN 下载约 3 秒/张），整批放在一个
+          事务里的话，一旦超过 cron 的超时时间整批回滚，下一次又从同一批重来，
+          队列永远不动。逐张提交后最多损失正在处理的那一张。
+        - 同时把队列里剩余的数量报告给 Odoo，队列没清空时 Odoo 会在同一次触发里
+          接着跑下一批（最多 10 轮），不用干等下一个周期。
+        - 按时间预算停止：超过预算就不再开始处理新图片，避免被 Odoo 强杀。
+        """
+        in_cron = bool(self.env.context.get('cron_id'))
+        IrCron = self.env['ir.cron']
+        now = time.monotonic()
+        deadline = now + self._time_budget(in_cron)
+        if in_cron:
+            job_deadline = self._cron_job_deadline()
+            if job_deadline is not None:
+                deadline = min(deadline, job_deadline)
+            if now >= deadline:
+                # 整个 cron 任务的时间预算已经用完：报告"没有剩余"，让这次触发结束，
+                # 剩下的交给下一个周期
+                IrCron._commit_progress(remaining=0)
+                return 0
+
         records = self.search([('state', '=', 'pending')], limit=limit, order='id')
-        for rec in records:
-            rec._process()
-        return len(records)
+        if in_cron:
+            IrCron._commit_progress(remaining=self.search_count([('state', '=', 'pending')]))
+
+        processed = 0
+        for start in range(0, len(records), DOWNLOAD_WORKERS):
+            if processed and time.monotonic() >= deadline:
+                break
+            chunk = records[start:start + DOWNLOAD_WORKERS]
+            downloads = self._prefetch(chunk)
+            for rec in chunk:
+                rec._process(download=downloads.get(rec.id))
+                processed += 1
+                if in_cron:
+                    IrCron._commit_progress(1)
+        return processed
+
+    @api.model
+    def _prefetch(self, records):
+        """并行下载一组图片，返回 {记录id: 图片字节 或 下载时抛出的异常}。"""
+        if len(records) <= 1:
+            return {}
+        urls = {rec.id: rec.source_url for rec in records}
+
+        def fetch(url):
+            try:
+                return self._download(url)
+            except Exception as e:  # 在 _process 里统一记成失败
+                return e
+
+        with ThreadPoolExecutor(max_workers=min(DOWNLOAD_WORKERS, len(urls))) as pool:
+            results = pool.map(fetch, urls.values())
+            return dict(zip(urls.keys(), results))
+
+    @api.model
+    def _time_budget(self, in_cron):
+        """本批最多可以用多少秒（按 Odoo 的超时配置算，没有限制时按 5 分钟）。"""
+        limit = config.get('limit_time_real_cron', -1) if in_cron else -1
+        if limit is None or limit < 0:
+            limit = config.get('limit_time_real', 120)
+        if not limit or limit <= 0:
+            limit = 600
+        return limit * TIME_BUDGET_RATIO
+
+    @api.model
+    def _cron_job_deadline(self):
+        """cron 会把本函数循环调用多轮；这里算出整个 cron 任务的截止时间。
+
+        Odoo 19 在 context 里放了 cron_end_time = 任务开始时间 + MIN_TIME_PER_JOB。
+        """
+        end_time = self.env.context.get('cron_end_time')
+        if not end_time:
+            return None
+        try:
+            from odoo.addons.base.models.ir_cron import MIN_TIME_PER_JOB
+        except ImportError:  # pragma: no cover - 以后的 Odoo 版本改名了就退化成只按单批控制
+            return None
+        return end_time - MIN_TIME_PER_JOB + self._time_budget(True)
 
     def action_retry(self):
         # 只重试选中的这几条（以前是按 id 顺序处理"任意 N 条待处理"，
@@ -68,20 +160,24 @@ class ShopifyImageQueue(models.Model):
     # ---------------------------------------------------------------
     # 核心处理逻辑
     # ---------------------------------------------------------------
-    def _process(self):
+    def _process(self, download=None):
+        """处理一张图。download 是已经预先下载好的结果（字节或异常），没有就现下。"""
         self.ensure_one()
         try:
+            if isinstance(download, Exception):
+                raise download
             # savepoint：写图片时如果触发数据库错误（例如图片字段校验失败），
             # 只回滚这一张图，事务还能继续把 state=error 写进去、处理下一张。
             with self.env.cr.savepoint():
-                self._process_one()
+                self._process_one(download)
             self.write({'state': 'done', 'error_message': False})
         except Exception as e:
             _logger.exception('图片同步失败: %s', self.source_url)
             self.write({'state': 'error', 'error_message': str(e)[:250]})
 
-    def _process_one(self):
-        content = self._download(self.source_url)
+    def _process_one(self, content=None):
+        if content is None:
+            content = self._download(self.source_url)
         if not content:
             raise ValueError('下载失败或返回空内容')
 
@@ -129,7 +225,11 @@ class ShopifyImageQueue(models.Model):
         media_item = {
             # 用原始 Shopify 图片 URL 当去重键：同一张图重复导入不会建重复记录，
             # 只会更新已有的 media.bind 行。
-            'shopify_media_id': self.source_url,
+            # 变体图片和画廊里的同一张图要分开存：键里带上变体 id，
+            # 否则会覆盖掉画廊那条 media.bind（把它变成变体专属、取消主图）。
+            'shopify_media_id': (
+                f'{self.source_url}#variant-{self.product_variant_id.id}'
+                if self.product_variant_id else self.source_url),
             'url': cdn_url,
             'media_type': 'image',
             'sequence': self.sequence,
@@ -177,10 +277,31 @@ class ShopifyImageQueue(models.Model):
     # ---------------------------------------------------------------
     # 下载 / 上传工具方法
     # ---------------------------------------------------------------
-    @staticmethod
-    def _download(url):
+    @classmethod
+    def _download(cls, url):
         if requests is None:
             raise RuntimeError('服务器缺少 requests 库，无法下载图片')
+        resized = cls._shopify_resized_url(url)
+        if resized != url:
+            try:
+                return cls._http_get_image(resized)
+            except Exception:
+                _logger.info('Shopify 缩略图下载失败，改下原图: %s', url, exc_info=True)
+        return cls._http_get_image(url)
+
+    @staticmethod
+    def _shopify_resized_url(url):
+        """Shopify CDN 图片加上 width/height 参数，按 1920px 以内等比缩放（小图不会被放大）。"""
+        parts = urlparse(url)
+        if parts.hostname not in SHOPIFY_CDN_HOSTS:
+            return url
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                 if k not in ('width', 'height', 'crop')]
+        query += [('width', str(SHOPIFY_MAX_PX)), ('height', str(SHOPIFY_MAX_PX))]
+        return urlunparse(parts._replace(query=urlencode(query)))
+
+    @staticmethod
+    def _http_get_image(url):
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         content_type = (resp.headers.get('Content-Type') or '').lower()

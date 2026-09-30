@@ -2,6 +2,40 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.1.0.2] - 2026-09-30
+
+Verified against a **real Shopify export** (284 products, 1,597 rows, 1,582
+images): all 284 products imported with 0 failures in ~23 s; a field-by-field
+comparison against the CSV (name, publish state, prices, per-variant prices,
+cost, SKU, barcode, weight, categories, tags, description) found no
+differences; re-importing the same file updated all 284 in place with no
+duplicates; all images downloaded from the Shopify CDN through the real cron
+runner.
+
+### Fixed
+
+- **Variant images were never linked to their variant.** In real Shopify
+  exports `Variant Image` is (almost) always also one of the product's
+  `Image Src` gallery images, and the queue de-duplicated by URL alone, so the
+  variant row was always skipped. The de-dup key is now *(URL, variant)*.
+  Variant images on single-variant products are skipped (nothing to link).
+  On the CDN path the variant's `media.bind` gets its own `shopify_media_id`
+  key so it doesn't overwrite the gallery entry for the same picture.
+- **Image cron could stall forever on a slow network.** A batch ran in one
+  transaction; real downloads take ~3 s each, so 30 images could exceed Odoo's
+  cron time limit, get killed and rolled back, and restart on the same batch.
+  The cron now commits after every image (`ir.cron._commit_progress`), stops
+  starting new images after half the cron time limit, and reports the queue
+  size so Odoo keeps draining it within the same trigger. The "立即同步一批图片"
+  button uses the same time budget, so it can't hit the HTTP request timeout.
+
+### Changed
+
+- Images are downloaded 8 at a time in parallel (HTTP only; database writes stay
+  sequential) and Shopify CDN images are requested pre-scaled to 1920 px
+  (Odoo stores at most 1920 px; falls back to the original URL). Cron interval
+  1 minute (was 2). Measured throughput went from ~5 to ~40 images/minute (all 1,589 images of the real export in about 40 minutes).
+
 ## [19.0.1.0.1] - 2026-09-30
 
 First version verified end-to-end on a real Odoo 19.0 database (see

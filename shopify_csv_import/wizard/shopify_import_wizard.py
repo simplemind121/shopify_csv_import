@@ -105,6 +105,7 @@ class ShopifyImportWizard(models.TransientModel):
         """手动立即处理一批排队图片，方便导入后马上看到效果，不用等 cron。"""
         self.ensure_one()
         Queue = self.env['shopify.image.queue']
+        # _cron_process_pending 自己会按请求超时时间控制处理时长，不会拖到网页超时
         processed = Queue._cron_process_pending(limit=50)
         remaining = Queue.search_count([('state', '=', 'pending')])
         failed = Queue.search_count([('state', '=', 'error')])
@@ -544,15 +545,18 @@ class ShopifyImportWizard(models.TransientModel):
     # =================================================================
     def _queue_images(self, tmpl, image_rows, variant_rows, option_names):
         Queue = self.env['shopify.image.queue']
-        existing_urls = set(
-            Queue.search([('product_tmpl_id', '=', tmpl.id)]).mapped('source_url')
-        )
+        # 去重键是 (图片URL, 变体)：Shopify 的 Variant Image 基本都同时是该商品
+        # 画廊里的某张 Image Src，只按 URL 去重会把变体图片的关联整个丢掉
+        existing = {
+            (q.source_url, q.product_variant_id.id or False)
+            for q in Queue.search([('product_tmpl_id', '=', tmpl.id)])
+        }
         count = 0
         base_vals = self._queue_base_vals(tmpl)
 
         for idx, row in enumerate(image_rows):
             url = (row.get('Image Src') or '').strip()
-            if not url or url in existing_urls:
+            if not url or (url, False) in existing:
                 continue
             position_raw = (row.get('Image Position') or '').strip()
             try:
@@ -568,20 +572,19 @@ class ShopifyImportWizard(models.TransientModel):
                 'source_url': url,
                 'alist_target_path': self._alist_target_path(tmpl, url),
             })
-            existing_urls.add(url)
+            existing.add((url, False))
             count += 1
 
-        # 变体专属图片（Variant Image 列，CSV 里很少用到，但支持一下）
+        # 变体专属图片（Variant Image 列）。单变体商品不用处理：唯一的变体
+        # 直接显示商品图片，Variant Image 只是重复指向其中一张。
+        if not option_names:
+            return count
         for row in variant_rows:
             v_url = (row.get('Variant Image') or '').strip()
-            if not v_url or v_url in existing_urls:
+            if not v_url:
                 continue
-            combo = self._row_combo(row, option_names)
-            variant = (
-                self._find_variant(tmpl, combo)
-                if combo else tmpl.product_variant_ids[:1]
-            )
-            if not variant:
+            variant = self._find_variant(tmpl, self._row_combo(row, option_names))
+            if not variant or (v_url, variant.id) in existing:
                 continue
             Queue.create({
                 **base_vals,
@@ -592,7 +595,7 @@ class ShopifyImportWizard(models.TransientModel):
                 'source_url': v_url,
                 'alist_target_path': self._alist_target_path(tmpl, v_url),
             })
-            existing_urls.add(v_url)
+            existing.add((v_url, variant.id))
             count += 1
 
         return count

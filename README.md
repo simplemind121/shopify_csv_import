@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.1.0.1`](./CHANGELOG.md#19011---2026-09-30) |
+| **Latest version** | [`19.0.1.0.2`](./CHANGELOG.md#19012---2026-09-30) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -65,7 +65,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ---
 
-## Feature matrix (current: 19.0.1.0.1)
+## Feature matrix (current: 19.0.1.0.2)
 
 | Area | Status |
 |---|---|
@@ -79,7 +79,7 @@ images, but works standalone with plain Odoo binary images too.
 | Alist/B2 CDN image sync via `media_picker`'s `media.bind` | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
 | Chunked commits for very large catalogs | Not yet |
-| Automated tests on a real Odoo 19 DB | Yes — 26 tests, see below |
+| Automated tests on a real Odoo 19 DB | Yes — 34 tests + verified on a real 284-product Shopify export, see below |
 
 ---
 
@@ -87,7 +87,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.1.0.1.zip
+#    shopify_csv_import-19.0.1.0.2.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS
