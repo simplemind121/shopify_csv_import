@@ -140,7 +140,8 @@
                 <separator/>
                 <filter name="problem" string="有问题的"
                         domain="[('verdict', 'in', ('no_backup', 'backup_missing', 'mismatch', 'lost'))]"/>
-                <filter name="cdn_fallback" string="缺备份" domain="[('verdict', '=', 'no_backup')]"/>
+                <filter name="cdn_fallback" string="缺备份"
+                        domain="[('media_source_id', '!=', False), ('backup_state', '!=', 'ok'), ('state', '!=', 'pending')]"/>
                 <filter name="backup_missing" string="备份丢失 / 不一致"
                         domain="[('verdict', 'in', ('backup_missing', 'mismatch'))]"/>
                 <filter name="source_gone" string="Shopify 已失效" domain="[('source_state', '=', 'gone')]"/>

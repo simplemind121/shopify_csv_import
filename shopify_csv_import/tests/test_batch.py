@@ -305,3 +305,56 @@ class TestShopifyImportBatch(ShopifyImportCase):
             row._process()
         self.assertEqual(row.state, 'error')
         self.assertIn('storage not found', row.cdn_error, '要显示最新一次的失败原因')
+
+    # ------------------------------------------------------------------
+    # 19.0.2.0.3：用正确的设置重新导入 = 修复
+    # ------------------------------------------------------------------
+    def test_20_reimport_with_fixed_settings_adopts_unfinished_images(self):
+        """第一次导入时上传文件夹填错，图片都缺备份；改对文件夹重新导入一次，
+        新批次要把这些图片接过来按新设置处理，而不是空着。"""
+        source = self._media_source()
+        first = self._run_import(media_source_id=source.id)
+        with self._mock_get(), self._mock_upload(fail='storage not found'):
+            self.Queue._cron_process_pending(limit=30)
+        self.assertTrue(first.paused)
+        self.assertEqual(first.img_fallback, 5)
+
+        second = self._run_import(media_source_id=source.id, alist_upload_path_prefix='b2/shopify-products')
+        self.assertEqual(second.image_queue_count, 5)
+        self.assertEqual((second.img_total, second.img_pending), (5, 5))
+        self.assertEqual(self.Queue.search_count([]), 5, '不新增图片行')
+        self.assertTrue(all(p.startswith('b2/shopify-products/') for p in second.queue_ids.mapped('alist_target_path')))
+        first.invalidate_recordset()
+        self.assertEqual((first.img_total, first.state), (0, 'done'), '旧批次的图片被接手后自己收尾')
+
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual({u['folder'] for u in self.uploads}, {'b2/shopify-products'})
+        self.assertEqual((second.state, second.img_cdn, second.img_fallback), ('done', 5, 0))
+
+        # 都备份好之后再导入：什么都不用重新排
+        third = self._run_import(media_source_id=source.id, alist_upload_path_prefix='b2/shopify-products')
+        self.assertEqual((third.image_queue_count, third.state), (0, 'done'))
+
+    def test_21_missing_backups_can_be_pushed_again(self):
+        """对账发现备份丢了的图片，也算"缺备份"，批次上的补传按钮要管得到。"""
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual((batch.img_cdn, batch.img_fallback), (5, 0))
+        batch.queue_ids[:2].write({'backup_state': 'missing'})
+        batch.invalidate_recordset()
+        self.assertEqual((batch.img_cdn, batch.img_fallback), (3, 2))
+        batch.action_retry_cdn_fallback()
+        self.assertEqual(batch.queue_ids.filtered(lambda q: q.state == 'pending').mapped('job'), ['backup', 'backup'])
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual((batch.state, batch.img_cdn, batch.img_fallback), ('done', 5, 0))
+
+    def test_22_actions_on_a_batch_without_images_do_not_reopen_it(self):
+        batch = self._run_import(self._csv('noimg2,No Image,,,,,TRUE,Title,Default Title,,,N-2,,5,,,,,,active'))
+        self.assertEqual(batch.state, 'done')
+        for action in ('action_verify', 'action_retry_cdn_fallback', 'action_retry_errors'):
+            getattr(batch, action)()
+            self.assertEqual(batch.state, 'done', action)

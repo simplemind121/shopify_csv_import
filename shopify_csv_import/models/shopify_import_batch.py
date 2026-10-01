@@ -81,7 +81,10 @@ class ShopifyImportBatch(models.Model):
     eta_text = fields.Char(string='预计剩余', compute='_compute_progress')
     last_error = fields.Char(string='最近一次失败', compute='_compute_progress')
 
-    @api.depends('state', 'next_index', 'total_products', 'queue_ids.state')
+    @api.depends('state', 'paused', 'next_index', 'total_products', 'started_at', 'images_started_at',
+                 'queue_ids.state', 'queue_ids.storage', 'queue_ids.backup_state',
+                 'queue_ids.display_source', 'queue_ids.source_state', 'queue_ids.cdn_error',
+                 'queue_ids.processed_at')
     def _compute_progress(self):
         Queue = self.env['shopify.image.queue']
         stats = {}
@@ -93,9 +96,17 @@ class ShopifyImportBatch(models.Model):
                 s[state] = s.get(state, 0) + count
                 if state == 'done':
                     s[storage or 'binary'] = s.get(storage or 'binary', 0) + count
+            # 缺备份：选了对象存储但备份不是"已备份"（上传失败 / 备份丢失 / 大小不一致），
+            # 加上旧版本留下的"上传失败后回退本地"的记录
             for batch, count in Queue._read_group(
-                    [('batch_id', 'in', ids), ('cdn_error', '!=', False)], ['batch_id'], ['__count']):
+                    [('batch_id', 'in', ids), ('state', '!=', 'pending'),
+                     '|', ('cdn_error', '!=', False),
+                     '&', ('media_source_id', '!=', False), ('backup_state', '!=', 'ok')],
+                    ['batch_id'], ['__count']):
                 stats.setdefault(batch.id, {})['fallback'] = count
+            for batch, count in Queue._read_group(
+                    [('batch_id', 'in', ids), ('backup_state', '=', 'ok')], ['batch_id'], ['__count']):
+                stats.setdefault(batch.id, {})['backed_up'] = count
             # 旧版本留下的"上传失败后回退成本地图片"的记录：既是本地图片又缺备份，
             # 进度条里只算进"缺备份"，不重复算进"本地图片"
             for batch, count in Queue._read_group(
@@ -122,7 +133,7 @@ class ShopifyImportBatch(models.Model):
             batch.img_done = done
             batch.img_error = error
             batch.img_pending = pending
-            batch.img_cdn = s.get('cdn', 0)
+            batch.img_cdn = s.get('backed_up', 0)
             batch.img_binary = s.get('binary', 0) - s.get('legacy_fallback', 0)
             batch.img_fallback = s.get('fallback', 0)
             batch.img_display_shopify = s.get('display_shopify', 0)
@@ -272,14 +283,15 @@ class ShopifyImportBatch(models.Model):
         self.write({'products_done_at': now, 'images_started_at': now, 'state': 'syncing'})
         if has_images:
             self._trigger_image_sync()
-        else:
-            self._refresh_image_state()
+        # 这次导入可能把以前批次里没处理好的图片接手过来了：那些批次（以及本批次，
+        # 如果没有图片要处理）没有待处理图片的，标成完成
+        (self | self.search([('state', '=', 'syncing')]))._refresh_image_state()
         return True
 
     def _refresh_image_state(self):
         """图片都处理完了的批次标记为完成。"""
         for batch in self.filtered(lambda b: b.state == 'syncing'):
-            batch.invalidate_recordset(['img_pending', 'img_error'])
+            batch.invalidate_recordset(['img_pending', 'img_error', 'img_total'])
             if batch.img_pending:
                 continue
             batch.write({
@@ -328,6 +340,8 @@ class ShopifyImportBatch(models.Model):
 
     def action_retry_errors(self):
         rows = self.queue_ids.filtered(lambda q: q.state == 'error')
+        if not rows:
+            return self._notify('没有失败的图片。', kind='info')
         rows.write({'state': 'pending', 'error_message': False})
         self._reopen_for_images(f'{len(rows)} 张失败图片已重新排队')
         return self._notify(f'{len(rows)} 张失败图片已重新排队，后台会继续处理。')
@@ -337,6 +351,8 @@ class ShopifyImportBatch(models.Model):
         Shopify 源还在就从 Shopify 拉原图，已经失效的主图改用本地那份。"""
         rows = self.queue_ids.filtered(
             lambda q: q.media_source_id and q.backup_state != 'ok' and q.state != 'pending')
+        if not rows:
+            return self._notify('没有缺备份的图片。', kind='info')
         rows.write({'job': 'backup', 'state': 'pending', 'error_message': False})
         self._reopen_for_images(f'{len(rows)} 张缺备份的图片重新排队上传对象存储')
         return self._notify(f'{len(rows)} 张图片已排队补传到对象存储。')
@@ -358,6 +374,8 @@ class ShopifyImportBatch(models.Model):
     def action_verify(self):
         """对账：逐张检查 Shopify 源和对象存储备份，在后台进行。"""
         rows = self.queue_ids.filtered(lambda q: q.state != 'pending' and q.media_source_id)
+        if not rows:
+            return self._notify('这个批次里没有可以对账的图片（没有图片，或者都还在排队）。', kind='info')
         rows.write({'job': 'verify', 'state': 'pending', 'error_message': False})
         self._reopen_for_images(f'{len(rows)} 张图片排队对账')
         return self._notify(f'{len(rows)} 张图片已排队对账，结果看「图片台账」的「对账结论」。')
@@ -418,6 +436,8 @@ class ShopifyImportBatch(models.Model):
         batch = self.browse(batch_id).exists()
         if not batch:
             return {}
+        # 速度 / 预计剩余跟"现在几点"有关，每次读取都重新算，不用缓存里的旧值
+        batch.invalidate_recordset()
         fnames = ['name', 'state', 'paused', 'status_message', 'total_products', 'next_index',
                   'created_count', 'updated_count', 'error_count', 'warning_count',
                   'img_total', 'img_pending', 'img_done', 'img_cdn', 'img_binary', 'img_fallback',

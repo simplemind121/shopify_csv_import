@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -33,6 +34,34 @@ try:
     import requests
 except ImportError:  # pragma: no cover - requests 是 Odoo 标准依赖，正常都有
     requests = None
+
+# 并发冲突最多重试几次（只在定时任务里重试，见 _process）
+CONCURRENCY_RETRIES = 3
+# 已经传到对象存储、但因为并发冲突还没写进数据库的上传结果：重试时直接用，不重复上传。
+# 键是 (数据库名, 台账行 id)，只在一次处理过程中存活。
+_UPLOAD_MEMO = {}
+# 图片实际格式 -> 上传时用的扩展名 / MIME。Shopify 对 .heic 等地址返回的其实是 JPEG，
+# 按内容取扩展名，备份出来的才是浏览器能显示、图片源也允许的格式。
+FORMAT_EXT = {'JPEG': ('jpg', 'image/jpeg'), 'PNG': ('png', 'image/png'),
+              'WEBP': ('webp', 'image/webp'), 'GIF': ('gif', 'image/gif')}
+WEB_EXTENSIONS = ('jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'svg')
+
+
+def _is_concurrency_error(exc):
+    """PostgreSQL 的并发冲突（40001 serialization_failure / 40P01 deadlock）。
+    同一事务里重试没有用（快照已经过期），必须回滚整个事务再来。"""
+    try:
+        from psycopg2 import errors as pg_errors
+        kinds = (pg_errors.SerializationFailure, pg_errors.DeadlockDetected)
+    except Exception:  # pragma: no cover
+        kinds = ()
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if (kinds and isinstance(exc, kinds)) or getattr(exc, 'pgcode', None) in ('40001', '40P01'):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 JOBS = [
     ('sync', '同步'),
@@ -236,7 +265,9 @@ class ShopifyImageQueue(models.Model):
             fetched = self._prefetch(chunk)
             for rec in chunk:
                 if rec.batch_id.paused:
-                    continue  # 这一组处理到一半时批次被自动暂停了：剩下的留着不动
+                    # 这一组处理到一半时批次被自动暂停了：剩下的留着不动
+                    _UPLOAD_MEMO.pop((self.env.cr.dbname, rec.id), None)
+                    continue
                 if rec.media_source_id and rec.job != 'verify':
                     rec.batch_id._set_status(
                         f'正在上传对象存储：{self._guess_filename(rec.source_url)}')
@@ -297,23 +328,64 @@ class ShopifyImageQueue(models.Model):
         """
         if len(records) <= 1:
             return {}
+        dbname = self.env.cr.dbname
+        # 上传也放进工作线程：原图平均 2MB，一张张传每分钟只有 7~8 张。
+        # 同一张图（变体图 = 画廊图）只让第一行预先上传，其余的在主线程里复用它的备份。
+        pre_upload, seen_keys = set(), set()
+        if self._parallel_upload_enabled():
+            for rec in records:
+                key = (rec.product_tmpl_id.id, self._image_key(rec.source_url))
+                if rec.media_source_id and rec.job == 'sync' and key not in seen_keys:
+                    pre_upload.add(rec.id)
+                seen_keys.add(key)
         tasks = {
-            rec.id: (rec.job, rec.source_url, bool(rec.media_source_id), rec.backup_url)
+            rec.id: (rec.id, rec.job, rec.source_url, bool(rec.media_source_id), rec.backup_url)
             for rec in records
         }
+        for rec_id in tasks:
+            _UPLOAD_MEMO.pop((dbname, rec_id), None)
 
         def run(task):
-            job, source_url, original, backup_url = task
+            rec_id, job, source_url, original, backup_url = task
             try:
                 if job == 'verify':
                     return {'source': self._probe(source_url),
                             'backup': self._probe(backup_url) if backup_url else None}
-                return self._download(source_url, original=original)
+                content = self._download(source_url, original=original)
+                if rec_id in pre_upload and content:
+                    self._upload_in_own_cursor(rec_id, content)
+                return content
             except Exception as e:  # 在 _process 里统一处理
                 return e
 
         with ThreadPoolExecutor(max_workers=min(DOWNLOAD_WORKERS, len(tasks))) as pool:
             return dict(zip(tasks.keys(), pool.map(run, tasks.values())))
+
+    @api.model
+    def _parallel_upload_enabled(self):
+        # 测试里所有数据都在一个没提交的事务里，别的数据库连接看不到（会一直等），
+        # 所以测试走串行
+        from odoo.modules import module
+        return not (getattr(module, 'current_test', False)
+                    or getattr(threading.current_thread(), 'testing', False))
+
+    @api.model
+    def _upload_in_own_cursor(self, rec_id, content):
+        """在工作线程里上传一张图：用独立的数据库连接（ORM 的游标不能跨线程共用），
+        把结果记到 _UPLOAD_MEMO，主线程处理这一行时直接取用，不再上传。
+        这里出任何意外都不抛出，主线程会按老办法自己上传。"""
+        try:
+            registry = self.env.registry
+            with registry.cursor() as cr:
+                env = api.Environment(cr, self.env.uid, dict(self.env.context))
+                rec = env['shopify.image.queue'].browse(rec_id).exists()
+                if not rec:
+                    return
+                vals = rec._backup(content)
+            # 成功和失败都记下来：失败的原因主线程直接写到台账上，不再重复尝试
+            _UPLOAD_MEMO[(registry.db_name, rec_id)] = vals
+        except Exception:
+            _logger.info('并行上传没成功，留给主线程重试: %s', rec_id, exc_info=True)
 
     @api.model
     def _time_budget(self, in_cron):
@@ -405,16 +477,33 @@ class ShopifyImageQueue(models.Model):
     def _process(self, download=None):
         """处理一张图当前排的任务。download 是预先取好的结果（字节 / 对账结果 / 异常）。"""
         self.ensure_one()
+        memo_key = (self.env.cr.dbname, self.id)
+        # 定时任务里每张图处理完都会提交，所以遇到并发冲突可以放心回滚整个事务再重试
+        # （只会丢掉这一张图还没提交的改动）。别的场景（页面按钮）不能回滚别人的改动。
+        can_retry = bool(self.env.context.get('cron_id'))
         try:
-            if isinstance(download, Exception) and self.job != 'backup':
-                raise download
-            # savepoint：写图片时如果触发数据库错误（例如图片字段校验失败），
-            # 只回滚这一张图，事务还能继续把 state=error 写进去、处理下一张。
-            with self.env.cr.savepoint():
-                vals = getattr(self, f'_job_{self.job}')(download)
-            self.write(dict(vals, state='done', error_message=False,
-                            processed_at=fields.Datetime.now()))
+            for attempt in range(CONCURRENCY_RETRIES + 1):
+                try:
+                    if isinstance(download, Exception) and self.job != 'backup':
+                        raise download
+                    # savepoint：写图片时如果触发数据库错误（例如图片字段校验失败），
+                    # 只回滚这一张图，事务还能继续把 state=error 写进去、处理下一张。
+                    with self.env.cr.savepoint():
+                        vals = getattr(self, f'_job_{self.job}')(download)
+                    self.write(dict(vals, state='done', error_message=False,
+                                    processed_at=fields.Datetime.now()))
+                    self.env.flush_all()
+                    break
+                except Exception as e:
+                    if not (_is_concurrency_error(e) and can_retry and attempt < CONCURRENCY_RETRIES):
+                        raise
+                    # media_picker 的主图同步等任务同时在改同一个商品：回滚后重来
+                    _logger.info('并发冲突，第 %s 次重试: %s', attempt + 1, self.source_url)
+                    self._rollback_for_retry()
+                    time.sleep(0.3 * (attempt + 1))
         except Exception as e:
+            if _is_concurrency_error(e) and can_retry:
+                self._rollback_for_retry()
             _logger.exception('图片任务失败（%s）: %s', self.job, self.source_url)
             vals = {'state': 'error', 'error_message': str(e)[:250],
                     'processed_at': fields.Datetime.now()}
@@ -422,6 +511,13 @@ class ShopifyImageQueue(models.Model):
                 # 补传失败：「备份失败原因」也换成这次的原因，不留着上一次的
                 vals.update(backup_state='failed', cdn_error=str(e)[:250])
             self.write(vals)
+        finally:
+            _UPLOAD_MEMO.pop(memo_key, None)
+
+    def _rollback_for_retry(self):
+        """并发冲突后丢掉当前事务（快照已经过期），让下一次尝试在新事务里进行。"""
+        self.env.cr.rollback()
+        self.env.invalidate_all()
 
     def _job_sync(self, content=None):
         """完整同步一张图。
@@ -526,7 +622,10 @@ class ShopifyImageQueue(models.Model):
         """把字节上传到图片源，返回要写到台账上的字段。失败不抛异常：
         前台仍然可以用 Shopify 链接显示，这张图只是"缺备份"，之后可以补传。"""
         source = self.media_source_id
-        folder, filename = self._backup_folder_and_name()
+        memo_key = (self.env.cr.dbname, self.id)
+        if memo_key in _UPLOAD_MEMO:
+            return dict(_UPLOAD_MEMO[memo_key])  # 并发冲突后的重试：文件已经传上去了
+        folder, filename = self._backup_folder_and_name(content)
         # 同一个商品里指向同一张 Shopify 图片的另一行（典型情况：变体图片同时也是画廊里的
         # 一张）已经传过，就直接复用那份备份，不重复上传
         key = self._image_key(self.source_url)
@@ -543,7 +642,7 @@ class ShopifyImageQueue(models.Model):
         try:
             result = source.upload_media(
                 folder, filename, io.BytesIO(content), size=len(content),
-                content_type=self._guess_mime(filename))
+                content_type=self._guess_mime(filename, content))
             url = (result or {}).get('url')
             if not url:
                 raise ValueError('已上传，但对象存储暂时还解析不出直链（索引没刷新），稍后点「补传备份」重试')
@@ -555,12 +654,15 @@ class ShopifyImageQueue(models.Model):
                 raise ValueError(
                     f'文件已上传到 {result.get("source_ref") or filename}，但返回的直链{problem}。'
                     f'请检查图片源的 CDN 设置（CDN 地址 / 要去掉的路径前缀）：{url.split("?")[0]}')
-            return {
+            vals = {
                 'backup_state': 'ok', 'backup_url': url,
                 'backup_ref': result.get('source_ref') or False,
                 'backup_size': len(content), 'backup_checked_at': fields.Datetime.now(),
                 'cdn_error': False, 'storage': 'cdn',
+                'alist_target_path': f"{folder.strip('/')}/{filename}".lstrip('/'),
             }
+            _UPLOAD_MEMO[memo_key] = dict(vals)
+            return vals
         except Exception as e:
             _logger.warning('上传对象存储失败，先只用 Shopify 外链显示: %s (%s)', self.source_url, e)
             return {'backup_state': 'failed', 'cdn_error': str(e)[:250] or type(e).__name__,
@@ -579,12 +681,30 @@ class ShopifyImageQueue(models.Model):
             return f'打不开（HTTP {code}）'
         return False
 
-    def _backup_folder_and_name(self):
+    def _backup_folder_and_name(self, content=None):
         path = (self.alist_target_path or '').strip('/')
         if not path:
             path = f'shopify-products/{self.product_tmpl_id.id}_{self._guess_filename(self.source_url)}'
         folder, _sep, filename = path.rpartition('/')
+        # 文件名的扩展名不是常见网页图片格式时（比如 iPhone 的 .heic——Shopify 对这种
+        # 地址返回的其实是 JPEG），按图片的实际格式改扩展名：图片源才允许上传，
+        # 以后切到备份链接时浏览器也才显示得出来
+        stem, dot, old_ext = filename.rpartition('.')
+        if not dot or old_ext.lower() not in WEB_EXTENSIONS:
+            ext = self._detect_format(content)[0] if content else None
+            if ext:
+                filename = f'{stem if dot else filename}.{ext}'
         return folder or '/', filename
+
+    @staticmethod
+    def _detect_format(content):
+        """(扩展名, MIME)；认不出来返回 (None, None)。"""
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(content)) as img:
+                return FORMAT_EXT.get(img.format, (None, None))
+        except Exception:
+            return (None, None)
 
     # ---------------------------------------------------------------
     # 前台显示：media_picker 的 media.bind
@@ -645,6 +765,8 @@ class ShopifyImageQueue(models.Model):
                             usage='gallery', source_ref=self.backup_ref or self._bind_key()))
                 break
             except Exception as e:
+                if _is_concurrency_error(e):
+                    raise  # 换一条链接重试没有用，交给 _process 回滚重来
                 last_error = e
                 _logger.info('显示链接写不进 media.bind（%s）: %s', target, e)
         else:
@@ -745,8 +867,11 @@ class ShopifyImageQueue(models.Model):
         name = url.split('/')[-1].split('?')[0]
         return name or 'image.jpg'
 
-    @staticmethod
-    def _guess_mime(filename):
+    @classmethod
+    def _guess_mime(cls, filename, content=None):
+        detected = cls._detect_format(content)[1] if content else None
+        if detected:
+            return detected
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         return {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp',
                 'gif': 'image/gif', 'avif': 'image/avif'}.get(ext, 'application/octet-stream')

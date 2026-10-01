@@ -108,6 +108,7 @@ class TestShopifyImportWizard(ShopifyImportCase):
         n_tmpl = self.Template.search_count([('x_shopify_handle', 'like', 'sci-test-%')])
         n_queue = self.Queue.search_count([])
         n_variants = len(self._tmpl('sci-test-tee').product_variant_ids)
+        self.Queue.search([]).write({'state': 'done'})  # 图片都已经同步完
 
         wizard = self._run_import()
         self.assertEqual((wizard.created_count, wizard.updated_count), (0, 4))
@@ -270,7 +271,8 @@ class TestShopifyImportWizard(ShopifyImportCase):
         one = self._tmpl('vi-one')
         self.assertFalse(self.Queue.search([('product_tmpl_id', '=', one.id), ('product_variant_id', '!=', False)]))
 
-        # 重复导入不会再排队
+        # 图片都同步完之后重复导入：不会再排队
+        self.Queue.search([]).write({'state': 'done'})
         self.assertEqual(self._run_import(csv_bytes).image_queue_count, 0)
 
     # ------------------------------------------------------------------
@@ -314,9 +316,9 @@ class TestShopifyImportWizard(ShopifyImportCase):
             f'ver-mug,Mug,,,,,TRUE,Title,Default Title,,,V-1,,5,,{img}a.jpg?v=222,1,,,active',
             f'ver-mug,,,,,,,,,,,,,,,{img}b.jpg?v=222,2,,,',
         ))
-        self.assertEqual(second.image_queue_count, 0, '不应新增图片')
+        self.assertEqual(second.image_queue_count, 2, '两张图重新排队同步')
         rows = self.Queue.search([('product_tmpl_id', '=', mug.id)])
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 2, '不应新增图片')
         self.assertEqual(set(rows.mapped('state')), {'pending'}, 'URL 变了要重新同步')
         self.assertTrue(all('v=222' in u for u in rows.mapped('source_url')))
         self.assertEqual(rows.batch_id, second)

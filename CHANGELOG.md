@@ -2,6 +2,43 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.2.0.5] - 2026-10-02
+
+Covers 19.0.2.0.3 – 19.0.2.0.5, all found while running a real 284-product /
+1,589-image import against a real Alist (B2) through media_picker 3.8.2.
+
+### Fixed
+
+- **Re-importing with corrected settings left the new batch empty.** Images
+  already in the ledger were skipped even when they had never been backed up,
+  so they stayed in the old batch with the old (wrong) upload folder. A
+  re-import now adopts every image that isn't finished under the new settings
+  (no backup yet, or a different source) into the new batch, with the new
+  folder; the old batch closes itself. "Re-import with the right settings" is
+  now the fix it looks like.
+- **Database concurrency conflicts were recorded as failures.** media_picker's
+  main-image sync writes the same product at the same time
+  (`could not serialize access due to concurrent update`). In the cron the
+  image is now rolled back and retried (up to 3 times) **without uploading
+  again** — the upload result is kept in memory for the retry.
+- **`.heic` images were rejected by the source** ("file extension is not
+  allowed"). Shopify actually serves JPEG for those URLs; when the file name's
+  extension isn't a web image format, the upload now takes the extension and
+  content type from the real image format.
+- A batch with no images could be put back into "syncing" forever by the
+  verify / retry buttons; they are now no-ops when there is nothing to queue.
+- "补传缺备份的图片" and the "缺备份" counter now include images whose backup was
+  found missing or mismatched by verification, not only failed uploads; the
+  "backed up" counter counts verified backups.
+- Speed / ETA / pause state on the progress panel could be stale (missing
+  compute dependencies); the panel now always recomputes.
+
+### Changed
+
+- **Uploads run in parallel** with the downloads (8 worker threads, each with
+  its own database cursor; database writes stay sequential). Measured on the
+  real run, with ~1.9 MB originals: ~7 → ~24 images/minute.
+
 ## [19.0.2.0.2] - 2026-10-01
 
 First run against a **real Alist** (media_picker 3.8.2, B2-backed storage).

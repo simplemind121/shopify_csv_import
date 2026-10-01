@@ -524,14 +524,28 @@ class ShopifyImportLogic(models.AbstractModel):
             for q in Queue.search([('product_tmpl_id', '=', tmpl.id)])
         }
 
+        requeued = [0]
+
         def queued(url, variant_id=False):
+            """这张图是否已经在台账里。已经在、但还没按这次导入的设置处理好的，
+            改挂到这次的批次下重新处理——"用正确的设置重新导入一次"就是修复办法。"""
             row = existing.get((key(url), variant_id))
             if row is True:  # 本次导入里刚排过队（CSV 里同一张图出现多次）
                 return True
-            if row and row.source_url != url:
-                row.write({'source_url': url, 'state': 'pending', 'error_message': False,
-                           **self._queue_base_vals(tmpl)})
-            return bool(row)
+            if not row:
+                return False
+            if self.media_source_id:
+                unfinished = row.backup_state != 'ok' or row.media_source_id != self.media_source_id
+            else:
+                unfinished = row.state != 'done'
+            if row.source_url != url or unfinished:
+                row.write({
+                    'source_url': url, 'job': 'sync', 'state': 'pending', 'error_message': False,
+                    'alist_target_path': self._alist_target_path(tmpl, url),
+                    **self._queue_base_vals(tmpl),
+                })
+                requeued[0] += 1
+            return True
         count = 0
         base_vals = self._queue_base_vals(tmpl)
 
@@ -559,7 +573,7 @@ class ShopifyImportLogic(models.AbstractModel):
         # 变体专属图片（Variant Image 列）。单变体商品不用处理：唯一的变体
         # 直接显示商品图片，Variant Image 只是重复指向其中一张。
         if not option_names:
-            return count
+            return count + requeued[0]
         for row in variant_rows:
             v_url = (row.get('Variant Image') or '').strip()
             if not v_url:
@@ -579,7 +593,7 @@ class ShopifyImportLogic(models.AbstractModel):
             existing[(key(v_url), variant.id)] = True
             count += 1
 
-        return count
+        return count + requeued[0]
 
     def _queue_base_vals(self, tmpl):
         vals = {'media_source_id': self.media_source_id.id or False}

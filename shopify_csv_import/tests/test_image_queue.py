@@ -201,6 +201,102 @@ class TestShopifyImageQueue(ShopifyImportCase):
         with probe(('unknown', 0, 0)):  # 网络错误：不当成问题
             self.assertFalse(Queue._check_backup_link('https://x/a.jpg', 100))
 
+    def test_08d_heic_named_image_is_uploaded_with_real_extension(self):
+        """iPhone 的 .heic 地址，Shopify 返回的其实是 JPEG/PNG：按实际格式取扩展名上传
+        （图片源不允许 .heic，浏览器也显示不了）。常见格式的文件名不改。"""
+        source = self._media_source()
+        img = 'https://cdn.shopify.com/s/files/1/x/'
+        self._run_import(self._csv(
+            f'heic-p,Heic,,,,,TRUE,Title,Default Title,,,H-1,,5,,{img}FullSizeRender.heic?v=1,1,,,active',
+            f'heic-p,,,,,,,,,,,,,,,{img}normal.jpg?v=1,2,,,',
+        ), media_source_id=source.id)
+        tmpl = self._tmpl('heic-p')
+        rows = self.Queue.search([('product_tmpl_id', '=', tmpl.id)], order='sequence')
+        with self._mock_get(), self._mock_upload():
+            for rec in rows:
+                rec._process()
+        self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+        self.assertEqual([u['filename'] for u in self.uploads],
+                         [f'{tmpl.id}_FullSizeRender.png', f'{tmpl.id}_normal.jpg'])
+        self.assertEqual(self.uploads[0]['content_type'], 'image/png')
+        self.assertEqual(rows[0].alist_target_path, f'shopify-products/{tmpl.id}_FullSizeRender.png')
+
+    def test_08e_concurrency_conflict_is_retried_without_reuploading(self):
+        """media_picker 的主图同步同时在改同一个商品时，数据库会报并发冲突：
+        在定时任务里要回滚重试，而且不能把已经传上去的文件再传一遍。"""
+        import psycopg2
+        source = self._media_source()
+        self._run_import(media_source_id=source.id)
+        mug = self._tmpl('sci-test-mug')
+        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
+        Queue = type(self.Queue)
+        real_write_bind = Queue._write_bind
+        calls = {'n': 0}
+
+        def flaky_write_bind(rec, prefer, backup_url=None):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                err = psycopg2.errors.SerializationFailure('could not serialize access due to concurrent update')
+                raise err
+            return real_write_bind(rec, prefer, backup_url=backup_url)
+
+        with self._mock_get(), self._mock_upload(), \
+                patch.object(Queue, '_write_bind', flaky_write_bind), \
+                patch.object(Queue, '_rollback_for_retry', lambda rec: None), \
+                patch(f'{QUEUE_MODULE}.time.sleep'):
+            main.with_context(cron_id=1)._process()
+        self.assertEqual((main.state, main.backup_state, main.display_source), ('done', 'ok', 'shopify'),
+                         main.error_message)
+        self.assertEqual(calls['n'], 2)
+        self.assertEqual(len(self.uploads), 1, '重试不重复上传')
+
+        # 不在定时任务里（页面按钮）：不回滚别人的改动，记成失败，之后可以重试
+        calls['n'] = 0
+        main.write({'state': 'pending'})
+        with self._mock_get(), self._mock_upload(), mute_logger(QUEUE_MODULE), \
+                patch.object(Queue, '_write_bind', flaky_write_bind):
+            main._process()
+        self.assertEqual(main.state, 'error')
+
+    def test_08f_parallel_upload_results_are_used_by_main_thread(self):
+        """上传在工作线程里做完后，主线程写台账时直接用结果，不再调用上传；
+        同一张图（变体图 = 画廊图）只预先上传一次。"""
+        source = self._media_source()
+        img = 'https://cdn.shopify.com/s/files/1/x/'
+        self._run_import(self._csv(
+            f'par-bag,Bag,,,,,TRUE,Color,Black,,,P-B,,10,,{img}black.jpg,1,{img}black.jpg,,active',
+            f'par-bag,,,,,,,,White,,,P-W,,10,,{img}white.jpg,2,,,',
+        ), media_source_id=source.id)
+        bag = self._tmpl('par-bag')
+        rows = self.Queue.search([('product_tmpl_id', '=', bag.id)], order='id')
+        self.assertEqual(len(rows), 3)  # black(画廊) / white(画廊) / black(变体)
+        Queue = type(self.Queue)
+        from odoo.addons.shopify_csv_import.models import shopify_image_queue as mod
+        pre_uploaded = []
+        # 工作线程里不能碰测试用的数据库连接：要用到的东西先在主线程里取好
+        names = {r.id: r._guess_filename(r.source_url) for r in rows}
+        dbname = self.env.cr.dbname
+
+        def fake_thread_upload(model, rec_id, content):
+            pre_uploaded.append(rec_id)
+            name = names[rec_id]
+            mod._UPLOAD_MEMO[(dbname, rec_id)] = {
+                'backup_state': 'ok', 'backup_url': f'https://media.example.com/par/{name}',
+                'backup_ref': f'/par/{name}', 'backup_size': len(content), 'cdn_error': False,
+                'storage': 'cdn', 'alist_target_path': f'par/{name}',
+            }
+
+        with self._mock_get(), self._mock_upload(), \
+                patch.object(Queue, '_parallel_upload_enabled', lambda model: True), \
+                patch.object(Queue, '_upload_in_own_cursor', fake_thread_upload):
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+        self.assertEqual(sorted(pre_uploaded), sorted(rows[:2].ids), '变体图和画廊图是同一张，只预先上传一次')
+        self.assertEqual(self.uploads, [], '主线程不应再上传')
+        self.assertEqual(set(rows.mapped('backup_state')), {'ok'})
+        self.assertEqual(rows[2].backup_url, rows[0].backup_url, '变体行复用画廊行的备份')
+        self.assertFalse(mod._UPLOAD_MEMO, '用完要清掉')
+
     def test_09_untrusted_shopify_domain_displays_backup(self):
         """media_picker 的可信域名名单不认 Shopify 时：有备份就直接显示备份。"""
         self.env['ir.config_parameter'].sudo().set_param('media_picker.trusted_domains', 'other.example.org')
