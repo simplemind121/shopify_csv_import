@@ -362,9 +362,12 @@ class ShopifyImportBatch(models.Model):
             batch.write(vals)
         self._trigger_image_sync()
 
-    @api.model
     def action_open_import_wizard(self):
-        """导入记录列表上的「导入 Shopify CSV」按钮：弹出上传窗口。"""
+        """导入记录列表上的「导入 Shopify CSV」按钮：弹出上传窗口。
+
+        不能加 @api.model：列表按钮被点击时，Odoo 会把当前勾选的记录 id（没勾选就是
+        空列表）当作第一个参数传进来，它要落到 self 上。
+        """
         action = self.env['ir.actions.act_window']._for_xml_id(
             'shopify_csv_import.action_shopify_import_wizard')
         action['context'] = {}

@@ -213,5 +213,37 @@ class TestShopifyImportBatch(ShopifyImportCase):
         self.assertEqual(first.action, self.env.ref('shopify_csv_import.action_shopify_import_batch'))
 
     def test_15_list_button_opens_upload_dialog(self):
-        action = self.env['shopify.import.batch'].action_open_import_wizard()
-        self.assertEqual((action['res_model'], action['target']), ('shopify.import.wizard', 'new'))
+        """走按钮真实的调用路径（和网页点击一样：把勾选的 id 列表作为参数传进来）。"""
+        from odoo.service.model import call_kw
+        Batch = self.env['shopify.import.batch']
+        for selected_ids in ([], self._start_import().ids):
+            action = call_kw(Batch, 'action_open_import_wizard', [selected_ids], {})
+            self.assertEqual((action['res_model'], action['target']), ('shopify.import.wizard', 'new'))
+
+    def test_16_every_view_button_is_callable_like_a_click(self):
+        """所有视图里的按钮都按"网页点击"的方式调用一遍，防止再出现签名对不上的方法。"""
+        import re
+        from odoo.service.model import call_kw
+        batch = self._run_import()
+        row = batch.queue_ids[:1]
+        cases = {
+            'shopify.import.batch': (batch, [
+                'shopify_csv_import.view_shopify_import_batch_list',
+                'shopify_csv_import.view_shopify_import_batch_form']),
+            'shopify.image.queue': (row, [
+                'shopify_csv_import.view_shopify_image_queue_list',
+                'shopify_csv_import.view_shopify_image_queue_form']),
+        }
+        called = []
+        with self._mock_get():
+            for model, (record, xmlids) in cases.items():
+                names = set()
+                for xmlid in xmlids:
+                    names |= set(re.findall(r'<button[^>]*name="(\w+)"[^>]*type="object"', self.env.ref(xmlid).arch))
+                    names |= set(re.findall(r'<button[^>]*type="object"[^>]*name="(\w+)"', self.env.ref(xmlid).arch))
+                self.assertTrue(names, model)
+                for name in sorted(names):
+                    call_kw(self.env[model], name, [record.ids], {})
+                    called.append(f'{model}.{name}')
+        self.assertIn('shopify.import.batch.action_open_import_wizard', called)
+        self.assertGreaterEqual(len(called), 12)

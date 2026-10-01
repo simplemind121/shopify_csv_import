@@ -2,6 +2,18 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.2.0.1] - 2026-10-01
+
+### Fixed
+
+- **The "导入 Shopify CSV" button on the import list raised a server error**
+  (`action_open_import_wizard() takes 1 positional argument but 2 were given`).
+  A list-header button passes the selected record ids to the method; it was
+  declared `@api.model`, so the ids arrived as an unexpected argument. The
+  earlier test called the method directly instead of the way a click does.
+- Tests now invoke **every** button in the module's views through the same
+  call path as a click (`call_kw` with the selected ids).
+
 ## [19.0.2.0.0] - 2026-10-01
 
 **Requires `media_picker` ≥ 19.0.3.8.** media_picker 3.8 removed
