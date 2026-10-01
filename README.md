@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.1.0.3`](./CHANGELOG.md#19013---2026-10-01) |
+| **Latest version** | [`19.0.1.1.0`](./CHANGELOG.md#19110---2026-10-01) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -65,7 +65,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ---
 
-## Feature matrix (current: 19.0.1.0.3)
+## Feature matrix (current: 19.0.1.1.0)
 
 | Area | Status |
 |---|---|
@@ -74,12 +74,13 @@ images, but works standalone with plain Odoo binary images too.
 | Multi-level website + internal category mapping | Supported |
 | Vendor → brand tag (URL-junk filtered) + Shopify Tags → tags | Supported |
 | Idempotent re-import (dedup by Handle) | Supported |
+| Background import batches with live progress page (pause / resume / retry) | Supported |
 | Async image sync via `ir.cron` queue | Supported |
 | Binary image fallback (no Alist configured) | Supported |
 | Alist/B2 CDN image sync via `media_picker`'s `media.bind` | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
-| Chunked commits for very large catalogs | Not yet |
-| Automated tests on a real Odoo 19 DB | Yes — 36 tests + verified on a real 284-product Shopify export, see below |
+| Chunked commits for very large catalogs | Supported (resumable, time-budgeted slices) |
+| Automated tests on a real Odoo 19 DB | Yes — 53 tests + verified on a real 284-product Shopify export, see below |
 
 ---
 
@@ -87,7 +88,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.1.0.3.zip
+#    shopify_csv_import-19.0.1.1.0.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS
@@ -96,6 +97,8 @@ sudo ./deploy_shopify_csv_import.sh --target staging   # test first
 sudo ./deploy_shopify_csv_import.sh                     # then production
 
 # 3) Odoo → top menu "Shopify 导入" → "导入商品 CSV" → upload your export
+#    You land on the batch page; progress keeps running if you close it.
+#    Come back any time: "Shopify 导入" → "导入批次（进度）"
 ```
 
 Full procedure, options, and rollback: **[docs/DEPLOY.md](./docs/DEPLOY.md)**.

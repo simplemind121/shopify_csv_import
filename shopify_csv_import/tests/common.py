@@ -45,13 +45,22 @@ class ShopifyImportCase(TransactionCase):
         cls.Template = cls.env['product.template']
         cls.Queue = cls.env['shopify.image.queue']
 
-    def _run_import(self, csv_bytes=None, **wizard_vals):
+    def _start_import(self, csv_bytes=None, **wizard_vals):
+        """走向导建批次（和用户在界面上点「开始导入」一样），返回批次，但还没执行。"""
         if csv_bytes is None:
             with open(SAMPLE_CSV, 'rb') as f:
                 csv_bytes = f.read()
-        wizard = self.Wizard.create(dict(csv_file=base64.b64encode(csv_bytes), **wizard_vals))
-        wizard.action_import()
-        return wizard
+        wizard = self.Wizard.create(dict(
+            csv_file=base64.b64encode(csv_bytes), csv_filename='products_export.csv', **wizard_vals))
+        action = wizard.action_import()
+        self.assertEqual(action['res_model'], 'shopify.import.batch')
+        return self.env['shopify.import.batch'].browse(action['res_id'])
+
+    def _run_import(self, csv_bytes=None, **wizard_vals):
+        """建批次并把商品导入阶段跑完（相当于后台任务执行完一轮），返回批次。"""
+        batch = self._start_import(csv_bytes, **wizard_vals)
+        self.assertTrue(batch._run_products())
+        return batch
 
     @staticmethod
     def _csv(*lines):

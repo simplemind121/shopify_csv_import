@@ -2,6 +2,48 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.1.1.0] - 2026-10-01
+
+### Added
+
+- **Import batches with live progress (`shopify.import.batch`).** Uploading a
+  CSV now creates a batch and returns immediately; both product import and
+  image sync run in background crons, so closing the browser no longer loses
+  anything. "Shopify 导入 → 导入批次（进度）" lists every import, and a batch
+  page shows a live panel (polls every 3 s, refreshes as soon as the tab
+  becomes visible again): phase, overall %, products (created / updated /
+  failed / warnings), an image bar split into *uploaded to Alist* / *local* /
+  *CDN failed → local fallback* / *failed* / *pending*, what's happening right
+  now ("正在并行下载 8 张图片", "正在上传 Alist：xxx.jpg"), speed, ETA and the
+  latest problem. It also warns when one of the module's crons is disabled
+  (the batch would otherwise just sit there).
+- Batch actions: pause / resume, "立即处理一段" (run a slice now), "重试失败图片",
+  and "重新上传回退本地的图片" — after fixing the Alist token, re-uploads the
+  images that had fallen back to local storage and deletes the local copies
+  once they're on the CDN, so the gallery doesn't show them twice.
+- Product import runs in resumable slices (time-budgeted, commit every 10
+  products), which also removes the HTTP timeout limit on very large CSVs.
+  Images of a batch are only synced once its products are all imported.
+- New cron "Shopify 导入批次" (triggered immediately on upload).
+- Migration: image-queue rows created before this version are grouped into an
+  "升级前的导入（历史记录）" batch so their progress is visible too.
+
+### Fixed
+
+- **Odoo created variant combinations that don't exist in Shopify**
+  (Odoo builds the cartesian product of attribute values). Combinations that
+  aren't in the CSV are archived; they're re-enabled if a later import has them.
+- **Re-importing after an image changed in Shopify added a duplicate image.**
+  Shopify image URLs carry a `?v=` version; image de-dup now ignores it,
+  updates the existing queue row and re-syncs it in place (local images are
+  overwritten, `media.bind` rows matched by the same key).
+- Excel-mangled exports: leading `'` on SKUs/barcodes is stripped; barcodes in
+  scientific notation (`9.78E+12`, digits already lost) are skipped with a
+  warning; semicolon- or tab-delimited files are detected.
+- Speed / ETA use the last 5 minutes of actual processing (`processed_at`), not
+  the whole history — pauses, restarts or a sleeping machine no longer produce
+  "about 4 hours" for a 10-minute job.
+
 ## [19.0.1.0.3] - 2026-10-01
 
 Verified against the **real `media_picker` 19.0.3.4.3** (all 36 tests pass

@@ -15,7 +15,7 @@ class TestShopifyImportWizard(ShopifyImportCase):
 
     def test_01_counts_and_log(self):
         wizard = self._run_import()
-        self.assertEqual(wizard.state, 'done')
+        self.assertEqual(wizard.state, 'syncing')  # 商品已导入，图片待同步
         self.assertEqual(
             (wizard.created_count, wizard.updated_count, wizard.error_count), (4, 0, 0),
             wizard.import_log)
@@ -162,7 +162,7 @@ class TestShopifyImportWizard(ShopifyImportCase):
         self.assertEqual(rows.media_source_id, source)
         self.assertEqual(rows[0].alist_target_path, f'/b2/test/{mug.id}_mug-1.jpg')
 
-    @mute_logger('odoo.addons.shopify_csv_import.wizard.shopify_import_wizard', 'odoo.sql_db')
+    @mute_logger('odoo.addons.shopify_csv_import.models.shopify_import_batch', 'odoo.sql_db')
     def test_12_one_bad_product_does_not_break_batch(self):
         # 两个商品用同一个条码：Odoo 的条码唯一约束会让第二个失败，但第一个和第三个要照常导入
         wizard = self._run_import(self._csv(
@@ -198,10 +198,10 @@ class TestShopifyImportWizard(ShopifyImportCase):
         self.assertEqual(len(cap.product_variant_ids), 3)
         self.assertEqual(cap.attribute_line_ids.attribute_id.create_variant, 'always')
 
-    def test_16_process_images_now_returns_notification(self):
-        wizard = self._run_import()
+    def test_16_run_now_returns_notification(self):
+        batch = self._run_import()
         self.Queue.search([]).write({'state': 'done'})
-        action = wizard.action_process_images_now()
+        action = batch.action_run_now()
         self.assertEqual(action['tag'], 'display_notification')
 
     def test_17_variant_image_reusing_gallery_image(self):
@@ -230,3 +230,67 @@ class TestShopifyImportWizard(ShopifyImportCase):
 
         # 重复导入不会再排队
         self.assertEqual(self._run_import(csv_bytes).image_queue_count, 0)
+
+    # ------------------------------------------------------------------
+    # 19.0.1.1.0：变体组合、重复导入、Excel 脏数据
+    # ------------------------------------------------------------------
+    def test_18_missing_combinations_are_archived(self):
+        """Shopify 只卖 3 个组合时，Odoo 按笛卡尔积多生成的第 4 个要归档，不能被买到。"""
+        batch = self._run_import(self._csv(
+            'cmb-tee,Tee,,,,,TRUE,Color,Red,Size,S,C-RS,,10,,,,,,active',
+            'cmb-tee,,,,,,,,Red,,M,C-RM,,12,,,,,,',
+            'cmb-tee,,,,,,,,Blue,,S,C-BS,,10,,,,,,',
+        ))
+        tee = self._tmpl('cmb-tee')
+        self.assertEqual(len(tee.product_variant_ids), 3)
+        archived = tee.with_context(active_test=False).product_variant_ids - tee.product_variant_ids
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(set(archived.product_template_attribute_value_ids.mapped('name')), {'Blue', 'M'})
+        self.assertIn('已归档', batch.import_log)
+        # Shopify 里补上这个组合后重新导入：重新启用
+        self._run_import(self._csv(
+            'cmb-tee,Tee,,,,,TRUE,Color,Red,Size,S,C-RS,,10,,,,,,active',
+            'cmb-tee,,,,,,,,Red,,M,C-RM,,12,,,,,,',
+            'cmb-tee,,,,,,,,Blue,,S,C-BS,,10,,,,,,',
+            'cmb-tee,,,,,,,,Blue,,M,C-BM,,12,,,,,,',
+        ))
+        self.assertEqual(len(tee.product_variant_ids), 4)
+        self.assertAlmostEqual(self._variant(tee, {'Color': 'Blue', 'Size': 'M'}).lst_price, 12.0)
+
+    def test_19_reimport_with_new_image_version_does_not_duplicate(self):
+        img = 'https://cdn.shopify.com/s/files/1/x/'
+        first = self._run_import(self._csv(
+            f'ver-mug,Mug,,,,,TRUE,Title,Default Title,,,V-1,,5,,{img}a.jpg?v=111,1,,,active',
+            f'ver-mug,,,,,,,,,,,,,,,{img}b.jpg?v=111,2,,,',
+        ))
+        self.assertEqual(first.image_queue_count, 2)
+        mug = self._tmpl('ver-mug')
+        rows = self.Queue.search([('product_tmpl_id', '=', mug.id)])
+        rows.write({'state': 'done'})
+        # 图片在 Shopify 里更新过：URL 的 v 变了
+        second = self._run_import(self._csv(
+            f'ver-mug,Mug,,,,,TRUE,Title,Default Title,,,V-1,,5,,{img}a.jpg?v=222,1,,,active',
+            f'ver-mug,,,,,,,,,,,,,,,{img}b.jpg?v=222,2,,,',
+        ))
+        self.assertEqual(second.image_queue_count, 0, '不应新增图片')
+        rows = self.Queue.search([('product_tmpl_id', '=', mug.id)])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(set(rows.mapped('state')), {'pending'}, 'URL 变了要重新同步')
+        self.assertTrue(all('v=222' in u for u in rows.mapped('source_url')))
+        self.assertEqual(rows.batch_id, second)
+
+    def test_20_excel_artifacts(self):
+        batch = self._run_import(self._csv(
+            "xl-a,A,,,,,TRUE,Title,Default Title,,,'977879170009,,5,9.78E+12,,,,,active",
+        ))
+        a = self._tmpl('xl-a')
+        self.assertEqual(a.default_code, '977879170009')
+        self.assertFalse(a.barcode)
+        self.assertIn('科学计数法', batch.import_log)
+        self.assertEqual(batch.warning_count, 1)
+
+    def test_21_semicolon_delimited_csv(self):
+        csv_bytes = ('Handle;Title;Variant Price\nsemi-mug;Semi Mug;7,5\n').encode('utf-8')
+        batch = self._run_import(csv_bytes)
+        self.assertEqual(batch.created_count, 1, batch.import_log)
+        self.assertEqual(self._tmpl('semi-mug').name, 'Semi Mug')

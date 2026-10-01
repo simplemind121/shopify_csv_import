@@ -10,6 +10,7 @@
                   decoration-success="state == 'done'"
                   decoration-muted="state == 'pending'">
                 <field name="product_tmpl_id"/>
+                <field name="batch_id" optional="show"/>
                 <field name="role"/>
                 <field name="source_url"/>
                 <field name="media_source_id"/>
@@ -28,6 +29,7 @@
             <form string="图片同步记录">
                 <group>
                     <field name="product_tmpl_id"/>
+                    <field name="batch_id"/>
                     <field name="product_variant_id"/>
                     <field name="role"/>
                     <field name="source_url"/>
@@ -62,6 +64,7 @@
                 <group>
                     <filter name="group_state" string="按状态" context="{'group_by': 'state'}"/>
                     <filter name="group_product" string="按商品" context="{'group_by': 'product_tmpl_id'}"/>
+                    <filter name="group_batch" string="按批次" context="{'group_by': 'batch_id'}"/>
                 </group>
             </search>
         </field>

@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_shopify_import_batch_list" model="ir.ui.view">
+        <field name="name">shopify.import.batch.list</field>
+        <field name="model">shopify.import.batch</field>
+        <field name="arch" type="xml">
+            <list string="导入批次" create="false"
+                  decoration-info="state in ('queued', 'importing', 'syncing')"
+                  decoration-success="state == 'done'"
+                  decoration-warning="state == 'done_errors'">
+                <field name="name"/>
+                <field name="create_date" string="创建时间"/>
+                <field name="state" widget="badge"
+                       decoration-info="state in ('queued', 'importing', 'syncing')"
+                       decoration-success="state == 'done'"
+                       decoration-warning="state == 'done_errors'"/>
+                <field name="paused" widget="boolean_toggle" readonly="1" optional="hide"/>
+                <field name="progress" widget="progressbar"/>
+                <field name="total_products"/>
+                <field name="error_count" optional="show"/>
+                <field name="img_total"/>
+                <field name="img_cdn" optional="hide"/>
+                <field name="img_fallback" optional="hide"/>
+                <field name="img_error" optional="show"/>
+                <field name="status_message" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_shopify_import_batch_form" model="ir.ui.view">
+        <field name="name">shopify.import.batch.form</field>
+        <field name="model">shopify.import.batch</field>
+        <field name="arch" type="xml">
+            <form string="导入批次" create="false">
+                <header>
+                    <button name="action_run_now" string="立即处理一段" type="object" class="btn-primary"
+                            invisible="state in ('done', 'done_errors') or paused"/>
+                    <button name="action_pause" string="暂停" type="object"
+                            invisible="paused or state in ('done', 'done_errors')"/>
+                    <button name="action_resume" string="继续" type="object" class="btn-primary"
+                            invisible="not paused"/>
+                    <button name="action_retry_errors" string="重试失败图片" type="object"
+                            invisible="img_error == 0"/>
+                    <button name="action_retry_cdn_fallback" string="重新上传回退本地的图片" type="object"
+                            invisible="img_fallback == 0"
+                            confirm="确认 Alist 图片源的 token 已经改好？这些图片会重新下载并上传 Alist，成功后自动删掉当时存的本地副本。"/>
+                    <field name="state" widget="statusbar" statusbar_visible="queued,importing,syncing,done"/>
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_images" type="object" class="oe_stat_button" icon="fa-picture-o">
+                            <field name="img_total" widget="statinfo" string="图片"/>
+                        </button>
+                        <button name="action_view_images" type="object" class="oe_stat_button" icon="fa-times-circle"
+                                context="{'queue_filter': {'search_default_error': 1}}" invisible="img_error == 0">
+                            <field name="img_error" widget="statinfo" string="失败"/>
+                        </button>
+                        <button name="action_view_images" type="object" class="oe_stat_button" icon="fa-exclamation-triangle"
+                                context="{'queue_filter': {'search_default_cdn_fallback': 1}}" invisible="img_fallback == 0">
+                            <field name="img_fallback" widget="statinfo" string="回退本地"/>
+                        </button>
+                    </div>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <!-- 实时进度面板：每 3 秒自动刷新，不用手动刷新页面 -->
+                    <widget name="shopify_batch_progress"/>
+                    <group>
+                        <group string="文件">
+                            <field name="csv_file" filename="csv_filename"/>
+                            <field name="csv_filename" invisible="1"/>
+                            <field name="media_source_id"/>
+                            <field name="alist_upload_path_prefix" invisible="not media_source_id"/>
+                        </group>
+                        <group string="时间">
+                            <field name="started_at"/>
+                            <field name="products_done_at"/>
+                            <field name="finished_at"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="导入日志" name="log">
+                            <field name="import_log" nolabel="1" widget="text"
+                                   placeholder="商品开始导入后，每个商品的结果会显示在这里"/>
+                        </page>
+                        <page string="图片" name="images">
+                            <field name="queue_ids" nolabel="1" readonly="1">
+                                <list limit="40"
+                                      decoration-danger="state == 'error'"
+                                      decoration-warning="state == 'done' and cdn_error"
+                                      decoration-muted="state == 'pending'">
+                                    <field name="product_tmpl_id"/>
+                                    <field name="role"/>
+                                    <field name="source_url" optional="hide"/>
+                                    <field name="state"/>
+                                    <field name="storage"/>
+                                    <field name="error_message"/>
+                                    <field name="cdn_error"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_shopify_import_batch_search" model="ir.ui.view">
+        <field name="name">shopify.import.batch.search</field>
+        <field name="model">shopify.import.batch</field>
+        <field name="arch" type="xml">
+            <search string="导入批次">
+                <field name="name"/>
+                <filter name="running" string="进行中" domain="[('state', 'in', ('queued', 'importing', 'syncing'))]"/>
+                <filter name="finished" string="已完成" domain="[('state', 'in', ('done', 'done_errors'))]"/>
+                <filter name="with_errors" string="有失败" domain="[('state', '=', 'done_errors')]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_shopify_import_batch" model="ir.actions.act_window">
+        <field name="name">导入批次</field>
+        <field name="res_model">shopify.import.batch</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_shopify_import_batch_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">还没有导入过 Shopify 商品</p>
+            <p>在「Shopify 导入 → 导入商品 CSV」上传文件后，每次导入都会在这里生成一个批次，
+               可以随时查看商品导入和图片同步（上传 Alist）的进度。</p>
+        </field>
+    </record>
+
+</odoo>

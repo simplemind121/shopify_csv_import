@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="shopify_csv_import.BatchProgress">
+        <div class="alert alert-danger" t-if="!state.data and state.error" t-esc="state.error"/>
+        <div class="o_shopify_batch_progress mb-3 p-3 border rounded" t-if="state.data">
+            <t t-set="d" t-value="state.data"/>
+            <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+                <span class="badge" t-att-class="d.paused ? 'text-bg-secondary' : d.active ? 'text-bg-info' : (d.state === 'done' ? 'text-bg-success' : 'text-bg-warning')">
+                    <t t-esc="d.paused ? '已暂停' : d.state_label"/>
+                </span>
+                <strong class="fs-4" t-esc="pct(d.progress)"/>
+                <span class="text-muted" t-if="d.status_message" t-esc="d.status_message"/>
+                <span class="ms-auto small text-muted">
+                    <t t-if="d.active and !d.paused and !d.cron_warning">
+                        <i class="fa fa-circle-o-notch fa-spin me-1"/>后台运行中，可以关闭页面 ·
+                    </t>
+                    <t t-esc="state.updatedAt"/> 更新
+                </span>
+            </div>
+
+            <div class="mb-1 d-flex justify-content-between small">
+                <span>① 导入商品</span>
+                <span><t t-esc="d.next_index"/> / <t t-esc="d.total_products"/>
+                    （新建 <t t-esc="d.created_count"/> · 更新 <t t-esc="d.updated_count"/>
+                    <t t-if="d.error_count"> · <span class="text-danger">失败 <t t-esc="d.error_count"/></span></t>
+                    <t t-if="d.warning_count"> · <span class="text-warning">警告 <t t-esc="d.warning_count"/></span></t>）</span>
+            </div>
+            <div class="progress mb-3" style="height: 10px;">
+                <div class="progress-bar bg-primary" role="progressbar" t-att-style="'width: ' + pct(d.product_progress)"/>
+            </div>
+
+            <div class="mb-1 d-flex justify-content-between small">
+                <span>② 同步图片<t t-if="d.media_source_name">（上传到 Alist：<t t-esc="d.media_source_name"/>）</t><t t-else="">（存为 Odoo 本地图片）</t></span>
+                <span><t t-esc="d.img_done + d.img_error"/> / <t t-esc="d.img_total"/></span>
+            </div>
+            <div class="progress mb-2" style="height: 14px;">
+                <t t-set="tot" t-value="d.img_total || 1"/>
+                <div class="progress-bar bg-success" title="已上传 Alist" t-att-style="'width: ' + pct(100 * d.img_cdn / tot)"/>
+                <div class="progress-bar bg-info" title="本地存储" t-att-style="'width: ' + pct(100 * (d.img_binary - d.img_fallback) / tot)"/>
+                <div class="progress-bar bg-warning" title="CDN 失败、已回退本地" t-att-style="'width: ' + pct(100 * d.img_fallback / tot)"/>
+                <div class="progress-bar bg-danger" title="失败" t-att-style="'width: ' + pct(100 * d.img_error / tot)"/>
+            </div>
+            <div class="d-flex flex-wrap gap-3 small mb-2">
+                <span t-if="d.media_source_name"><span class="badge text-bg-success">&#160;</span> 已上传 Alist <b t-esc="d.img_cdn"/></span>
+                <span><span class="badge text-bg-info">&#160;</span> 本地存储 <b t-esc="d.img_binary - d.img_fallback"/></span>
+                <span t-if="d.img_fallback"><span class="badge text-bg-warning">&#160;</span> CDN 失败回退本地 <b t-esc="d.img_fallback"/></span>
+                <span t-if="d.img_error"><span class="badge text-bg-danger">&#160;</span> 失败 <b t-esc="d.img_error"/></span>
+                <span><span class="badge text-bg-light border">&#160;</span> 待处理 <b t-esc="d.img_pending"/></span>
+                <span class="ms-auto" t-if="d.speed_text">速度 <b t-esc="d.speed_text"/><t t-if="d.eta_text"> · 预计剩余 <b t-esc="d.eta_text"/></t></span>
+            </div>
+            <div class="alert alert-danger py-1 px-2 mb-2 small" t-if="d.cron_warning">
+                <i class="fa fa-exclamation-circle me-1"/><t t-esc="d.cron_warning"/>
+            </div>
+            <div class="alert alert-warning py-1 px-2 mb-0 small" t-if="d.last_error">
+                最近一次问题：<t t-esc="d.last_error"/>
+            </div>
+            <div class="text-danger small mt-1" t-if="state.error" t-esc="state.error"/>
+        </div>
+    </t>
+</templates>

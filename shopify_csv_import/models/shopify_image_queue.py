@@ -44,6 +44,12 @@ class ShopifyImageQueue(models.Model):
         ('extra', '附加图片'),
     ], string='类型', default='extra', required=True)
     source_url = fields.Char(string='Shopify 原始图片URL', required=True)
+    batch_id = fields.Many2one(
+        'shopify.import.batch', string='导入批次', ondelete='set null', index=True)
+    # 回退成本地二进制时建的附加图片；以后重新同步成功（比如改好 Alist token 后重试）
+    # 要覆盖或删掉它，不能让同一张图在画廊里出现两次
+    binary_image_id = fields.Many2one(
+        'product.image', string='本地附加图片', ondelete='set null', readonly=True, copy=False)
 
     # 走 CDN 模式时使用：选了 media_source_id 就会尝试上传到 Alist，
     # 失败或没选就直接回退成 Odoo 本地二进制图片。
@@ -68,12 +74,15 @@ class ShopifyImageQueue(models.Model):
         ('binary', '本地二进制'),
     ], string='存储位置', readonly=True, copy=False)
     cdn_error = fields.Char(string='CDN 失败原因', readonly=True, copy=False)
+    # 实际处理完成（成功或失败）的时间，用来算同步速度。不能用 write_date：
+    # 改批次、重新排队等操作也会更新 write_date
+    processed_at = fields.Datetime(string='处理时间', readonly=True, copy=False, index=True)
 
     # ---------------------------------------------------------------
     # cron 入口
     # ---------------------------------------------------------------
     @api.model
-    def _cron_process_pending(self, limit=30):
+    def _cron_process_pending(self, limit=30, batch=None):
         """处理一批待同步图片，返回本次处理的张数。
 
         - 在 cron 里运行时，每处理完一张就用 ir.cron._commit_progress 提交一次：
@@ -98,22 +107,53 @@ class ShopifyImageQueue(models.Model):
                 IrCron._commit_progress(remaining=0)
                 return 0
 
-        records = self.search([('state', '=', 'pending')], limit=limit, order='id')
+        domain = self._pending_domain()
+        if batch:
+            domain = [('batch_id', '=', batch.id)] + domain
+        records = self.search(domain, limit=limit, order='id')
         if in_cron:
-            IrCron._commit_progress(remaining=self.search_count([('state', '=', 'pending')]))
+            IrCron._commit_progress(remaining=self.search_count(domain))
 
         processed = 0
         for start in range(0, len(records), DOWNLOAD_WORKERS):
             if processed and time.monotonic() >= deadline:
                 break
             chunk = records[start:start + DOWNLOAD_WORKERS]
+            # 进度说明：导入批次页面上会实时显示这一句
+            chunk.batch_id._set_status(f'正在并行下载 {len(chunk)} 张图片')
+            if in_cron:
+                IrCron._commit_progress(0)
             downloads = self._prefetch(chunk)
             for rec in chunk:
+                if rec.media_source_id:
+                    rec.batch_id._set_status(f'正在上传 Alist：{self._guess_filename(rec.source_url)}')
                 rec._process(download=downloads.get(rec.id))
                 processed += 1
                 if in_cron:
                     IrCron._commit_progress(1)
+        records.batch_id._refresh_image_state()
         return processed
+
+    @api.model
+    def _pending_domain(self):
+        """待处理、且所属批次没有被暂停的图片（升级前导入的旧记录没有批次）。"""
+        # 批次还在导入商品阶段时先不处理它的图片：避免和商品导入同时写同一个商品
+        return [
+            ('state', '=', 'pending'),
+            '|', ('batch_id', '=', False),
+            '&', ('batch_id.paused', '=', False),
+            ('batch_id.state', 'not in', ('queued', 'importing')),
+        ]
+
+    @staticmethod
+    def _image_key(url):
+        """图片去重键：Shopify CDN 的 URL 去掉 v（版本时间戳）和缩放参数。"""
+        parts = urlparse(url or '')
+        if parts.hostname not in SHOPIFY_CDN_HOSTS:
+            return url
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                 if k not in ('v', 'width', 'height', 'crop')]
+        return urlunparse(parts._replace(query=urlencode(query)))
 
     @api.model
     def _prefetch(self, records):
@@ -181,10 +221,12 @@ class ShopifyImageQueue(models.Model):
             self.write({
                 'state': 'done', 'error_message': False,
                 'storage': storage, 'cdn_error': cdn_error,
+                'processed_at': fields.Datetime.now(),
             })
         except Exception as e:
             _logger.exception('图片同步失败: %s', self.source_url)
-            self.write({'state': 'error', 'error_message': str(e)[:250]})
+            self.write({'state': 'error', 'error_message': str(e)[:250],
+                        'processed_at': fields.Datetime.now()})
 
     def _process_one(self, content=None):
         if content is None:
@@ -221,8 +263,11 @@ class ShopifyImageQueue(models.Model):
             self.product_variant_id.image_1920 = b64
         elif self.role == 'main':
             self.product_tmpl_id.image_1920 = b64
+        elif self.binary_image_id:
+            # 之前已经存过一份本地附加图（比如 Shopify 里图片更新了）：覆盖，不新增
+            self.binary_image_id.image_1920 = b64
         else:
-            self.env['product.image'].create({
+            self.binary_image_id = self.env['product.image'].create({
                 'product_tmpl_id': self.product_tmpl_id.id,
                 'name': self.product_tmpl_id.name,
                 'image_1920': b64,
@@ -239,9 +284,10 @@ class ShopifyImageQueue(models.Model):
             # 只会更新已有的 media.bind 行。
             # 变体图片和画廊里的同一张图要分开存：键里带上变体 id，
             # 否则会覆盖掉画廊那条 media.bind（把它变成变体专属、取消主图）。
+            # 键用去掉 ?v= 的 URL：图片在 Shopify 更新过也能对上同一条 media.bind
             'shopify_media_id': (
-                f'{self.source_url}#variant-{self.product_variant_id.id}'
-                if self.product_variant_id else self.source_url),
+                f'{self._image_key(self.source_url)}#variant-{self.product_variant_id.id}'
+                if self.product_variant_id else self._image_key(self.source_url)),
             'url': cdn_url,
             'media_type': 'image',
             'sequence': self.sequence,
@@ -254,6 +300,9 @@ class ShopifyImageQueue(models.Model):
 
         if not self.product_tmpl_id.use_external_media:
             self.product_tmpl_id.write({'use_external_media': True})
+        if self.binary_image_id:
+            # 以前 CDN 失败时回退存的本地副本，现在已经上了 CDN：删掉，免得画廊里重复
+            self.binary_image_id.unlink()
 
     def _upload_and_resolve(self, content):
         """上传到 Alist，再用 media_picker 自带的 get_file 解析出最终可信直链。

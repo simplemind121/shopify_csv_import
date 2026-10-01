@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Shopify CSV 商品导入',
-    'version': '19.0.1.0.3',
+    'version': '19.0.1.1.0',
     'category': 'Sales/Sales',
     'summary': '将 Shopify 导出的商品 CSV 一键导入到 Odoo 网站商城',
     'description': """
@@ -37,10 +37,16 @@ website_sale（自建商城）：
     'data': [
         'security/ir.model.access.csv',
         'wizard/shopify_import_wizard_views.xml',
+        'views/shopify_import_batch_views.xml',
         'views/shopify_image_queue_views.xml',
         'views/shopify_import_menu.xml',
         'data/ir_cron.xml',
     ],
+    'assets': {
+        'web.assets_backend': [
+            'shopify_csv_import/static/src/batch_progress/*',
+        ],
+    },
     'installable': True,
     'application': False,
     'auto_install': False,

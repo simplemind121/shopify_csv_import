@@ -137,7 +137,9 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertEqual(len(binds), 2)
         self.assertTrue(binds[0].is_main)
         self.assertEqual(binds[0].url, f'https://media.example.com/d/b2/shopify-products/{mug.id}_mug-1.jpg')
-        self.assertEqual(binds[0].shopify_media_id, rows[0].source_url)
+        # 去重键忽略 ?v=，图片在 Shopify 更新过也能对上同一条 media.bind
+        self.assertEqual(binds[0].shopify_media_id, self.Queue._image_key(rows[0].source_url))
+        self.assertNotIn('v=', binds[0].shopify_media_id)
         self.assertTrue(mug.use_external_media)
         self.assertFalse(mug.image_1920, 'CDN 成功时不应再存本地二进制')
 
@@ -272,8 +274,9 @@ class TestShopifyImageQueue(ShopifyImportCase):
             processed = self.Queue.with_context(cron_id=1)._cron_process_pending(limit=3)
         self.assertEqual(processed, 3)
         args = [c.args[1:] + tuple(sorted(c.kwargs.items())) for c in progress.call_args_list]
-        # 先报告剩余总数（5 张待处理），再每张图提交一次
-        self.assertEqual(args, [(('remaining', 5),), (1,), (1,), (1,)])
+        # 先报告剩余总数（5 张待处理）；每组开始时提交一次状态（页面上显示"正在下载…"），
+        # 之后每张图提交一次
+        self.assertEqual(args, [(('remaining', 5),), (0,), (1,), (1,), (1,)])
         self.assertEqual(self.Queue.search_count([('state', '=', 'pending')]), 2)
 
     def test_14_time_budget_stops_batch(self):
