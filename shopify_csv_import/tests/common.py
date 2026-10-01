@@ -2,7 +2,7 @@
 import base64
 import io
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from odoo.tests.common import TransactionCase
 
@@ -78,3 +78,29 @@ class ShopifyImportCase(TransactionCase):
             if set(combo.items()) <= have:
                 return variant
         self.fail(f'variant {combo} not found on {tmpl.display_name}')
+
+    # ------------------------------------------------------------------
+    # 对象存储（media_picker 的 media.source）
+    # ------------------------------------------------------------------
+    def _media_source(self, **vals):
+        """一个开启了上传的图片源。用 mock 类型：真实 media_picker 和测试替身都有。"""
+        return self.env['media.source'].create(dict({
+            'name': 'Test Object Storage', 'source_type': 'mock', 'upload_enabled': True,
+            'trusted_domains': 'media.example.com',
+        }, **vals))
+
+    def _mock_upload(self, fail=None):
+        """替换 media.source.upload_media：不发任何网络请求，记录收到的参数。"""
+        self.uploads = []
+
+        def fake_upload(source, folder, filename, stream, size=None, content_type=None, timeout=None):
+            data = stream.read()
+            self.uploads.append({'folder': folder, 'filename': filename, 'bytes': data,
+                                 'size': size, 'content_type': content_type})
+            if fail:
+                raise Exception(fail)
+            path = f"{(folder or '').strip('/')}/{filename}"
+            return {'url': f'https://media.example.com/{path}', 'source_ref': f'/{path}',
+                    'name': filename, 'media_type': 'image'}
+        return patch.object(type(self.env['media.source']), 'upload_media', autospec=True,
+                            side_effect=fake_upload)

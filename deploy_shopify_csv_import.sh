@@ -30,6 +30,7 @@ set -euo pipefail
 
 MODULE="shopify_csv_import"
 MIN_VERSION="19.0.1.0.0"
+MIN_MEDIA_PICKER="19.0.3.8.0"
 TARGET="prod"
 CONTAINER=""
 DB_NAME=""
@@ -227,6 +228,14 @@ fi
 if [ "$MODE" = "deploy" ]; then
   if [ -d "$ADDONS_DIR/media_picker" ]; then
     ok "依赖检查：media_picker 已在 $ADDONS_DIR 里"
+    # 19.0.2.x 对接的是 media_picker 3.8 的 media.source（上传接口 / 链接健康检查 / 主图同步）
+    MP_VERSION=$(grep -oE "'version'[[:space:]]*:[[:space:]]*'[^']+'" "$ADDONS_DIR/media_picker/__manifest__.py" 2>/dev/null | grep -oE "[0-9]+(\.[0-9]+)+" | head -n1 || true)
+    if [ -n "$MP_VERSION" ] && ver_lt "$MP_VERSION" "$MIN_MEDIA_PICKER"; then
+      err "media_picker 版本是 $MP_VERSION，本版 shopify_csv_import 需要 ${MIN_MEDIA_PICKER} 及以上"
+      err "请先升级 media_picker；如果只能用旧版 media_picker，请部署 shopify_csv_import 19.0.1.1.1"
+      exit 1
+    fi
+    [ -n "$MP_VERSION" ] && ok "media_picker 版本：$MP_VERSION（需要 ≥ ${MIN_MEDIA_PICKER}）"
   else
     err "依赖检查失败：$ADDONS_DIR 里没有 media_picker"
     err "shopify_csv_import 依赖 media_picker（图片走 CDN 用的 media.bind / product.media.source 接口），先部署 media_picker 再跑本脚本"
@@ -465,11 +474,11 @@ if [ -n "$CONFIG_FILE" ]; then
     warn "$CONFIG_FILE 缺少安全配置：dbfilter = ^${DB_NAME}\$ 与 list_db = False"
   fi
 fi
-MS_COUNT=$(db_query "SELECT count(*) FROM product_media_source;" 2>/dev/null | xargs || true)
+MS_COUNT=$(db_query "SELECT count(*) FROM media_source WHERE upload_enabled;" 2>/dev/null | xargs || true)
 if [ -n "$MS_COUNT" ] && [ "$MS_COUNT" != "0" ]; then
-  ok "检测到 $MS_COUNT 个 product.media.source（Alist 图片源）可在导入向导里选用"
+  ok "检测到 $MS_COUNT 个开启了上传的图片源（media.source），可在导入向导里选用"
 else
-  warn "没检测到任何 product.media.source——图片会全部走本地二进制兜底，想用 CDN 得先在 media_picker 里配一个"
+  warn "没检测到开启了上传的图片源——导入时只能把图片存成本地图片；想备份到对象存储，先在 media_picker 里配一个并开启上传"
 fi
 
 echo

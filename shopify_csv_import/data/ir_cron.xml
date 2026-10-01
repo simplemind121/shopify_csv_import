@@ -24,5 +24,17 @@
         <field name="active">True</field>
     </record>
 
+    <!-- Shopify 链接失效（media_picker 的链接健康检查判定为 broken，或对账时返回 404）
+         的图片，把前台显示换成对象存储的备份链接 -->
+    <record id="ir_cron_shopify_image_failover" model="ir.cron">
+        <field name="name">Shopify 图片失效切换</field>
+        <field name="model_id" ref="model_shopify_image_queue"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_failover()</field>
+        <field name="interval_number">10</field>
+        <field name="interval_type">minutes</field>
+        <field name="active">True</field>
+    </record>
+
     </data>
 </odoo>

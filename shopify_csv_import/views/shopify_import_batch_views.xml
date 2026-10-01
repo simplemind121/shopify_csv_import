@@ -24,6 +24,7 @@
                 <field name="total_products"/>
                 <field name="error_count" optional="show"/>
                 <field name="img_total"/>
+                <field name="media_source_id" optional="hide"/>
                 <field name="img_cdn" optional="hide"/>
                 <field name="img_fallback" optional="hide"/>
                 <field name="img_error" optional="show"/>
@@ -46,9 +47,14 @@
                             invisible="not paused"/>
                     <button name="action_retry_errors" string="重试失败图片" type="object"
                             invisible="img_error == 0"/>
-                    <button name="action_retry_cdn_fallback" string="重新上传回退本地的图片" type="object"
+                    <button name="action_retry_cdn_fallback" string="补传缺备份的图片" type="object"
                             invisible="img_fallback == 0"
-                            confirm="确认 Alist 图片源的 token 已经改好？这些图片会重新下载并上传 Alist，成功后自动删掉当时存的本地副本。"/>
+                            confirm="确认图片源已经配置好并开启了上传？缺备份的图片会重新上传到对象存储。"/>
+                    <button name="action_verify" string="对账" type="object"
+                            invisible="not media_source_id or state in ('queued', 'importing')"/>
+                    <button name="action_failover" string="切换失效链接" type="object"
+                            invisible="img_source_gone == 0 and img_display_shopify == 0"
+                            help="把 Shopify 链接已经失效的图片，立刻换成对象存储的备份链接"/>
                     <field name="state" widget="statusbar" statusbar_visible="queued,importing,syncing,done"/>
                 </header>
                 <sheet>
@@ -62,12 +68,18 @@
                         </button>
                         <button name="action_view_images" type="object" class="oe_stat_button" icon="fa-exclamation-triangle"
                                 context="{'queue_filter': {'search_default_cdn_fallback': 1}}" invisible="img_fallback == 0">
-                            <field name="img_fallback" widget="statinfo" string="回退本地"/>
+                            <field name="img_fallback" widget="statinfo" string="缺备份"/>
+                        </button>
+                        <button name="action_view_images" type="object" class="oe_stat_button" icon="fa-chain-broken"
+                                context="{'queue_filter': {'search_default_source_gone': 1}}" invisible="img_source_gone == 0">
+                            <field name="img_source_gone" widget="statinfo" string="Shopify 失效"/>
                         </button>
                     </div>
                     <div class="oe_title">
                         <h1><field name="name"/></h1>
                     </div>
+                    <field name="img_source_gone" invisible="1"/>
+                    <field name="img_display_shopify" invisible="1"/>
                     <!-- 实时进度面板：每 3 秒自动刷新，不用手动刷新页面 -->
                     <widget name="shopify_batch_progress"/>
                     <group>
@@ -97,8 +109,11 @@
                                     <field name="product_tmpl_id"/>
                                     <field name="role"/>
                                     <field name="source_url" optional="hide"/>
+                                    <field name="source_state"/>
+                                    <field name="backup_state"/>
+                                    <field name="display_source"/>
+                                    <field name="verdict"/>
                                     <field name="state"/>
-                                    <field name="storage"/>
                                     <field name="error_message"/>
                                     <field name="cdn_error"/>
                                 </list>

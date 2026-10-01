@@ -1,10 +1,10 @@
 # shopify_csv_import
 
-**Odoo 19 · Bulk-import a Shopify product CSV export into `website_sale` · optional Alist/B2 CDN images via `media_picker`**
+**Odoo 19 · Bulk-import a Shopify product CSV export into `website_sale` · object-storage image backup + Shopify-CDN-first display via `media_picker`**
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.1.1.1`](./CHANGELOG.md#19111---2026-10-01) |
+| **Latest version** | [`19.0.2.0.0`](./CHANGELOG.md#19200---2026-10-01) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -65,7 +65,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ---
 
-## Feature matrix (current: 19.0.1.1.1)
+## Feature matrix (current: 19.0.2.0.0)
 
 | Area | Status |
 |---|---|
@@ -76,11 +76,14 @@ images, but works standalone with plain Odoo binary images too.
 | Idempotent re-import (dedup by Handle) | Supported |
 | Background import batches with live progress page (pause / resume / retry) | Supported |
 | Async image sync via `ir.cron` queue | Supported |
-| Binary image fallback (no Alist configured) | Supported |
-| Alist/B2 CDN image sync via `media_picker`'s `media.bind` | Supported |
+| Local images (no object storage selected) | Supported |
+| Back up every image to object storage (Alist / S3) through `media_picker`'s `media.source` | Supported |
+| Display via Shopify's CDN first, automatic failover to the object-storage CDN when a Shopify link dies | Supported |
+| Main image also kept locally (synced by `media_picker`), other images external only | Supported |
+| Image ledger: per-image source / backup / local status, verification, relay (re-upload), manual display switch | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
 | Chunked commits for very large catalogs | Supported (resumable, time-budgeted slices) |
-| Automated tests on a real Odoo 19 DB | Yes — 53 tests + verified on a real 284-product Shopify export, see below |
+| Automated tests on a real Odoo 19 DB | Yes — 66 tests (stub and real `media_picker` 3.8.2) + verified on a real 284-product Shopify export |
 
 ---
 
@@ -88,7 +91,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.1.1.1.zip
+#    shopify_csv_import-19.0.2.0.0.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS
@@ -107,23 +110,37 @@ Full procedure, options, and rollback: **[docs/DEPLOY.md](./docs/DEPLOY.md)**.
 
 ## How the image pipeline works
 
-1. The import wizard queues every image URL from the CSV into a
-   `shopify.image.queue` row (main image / extra image / variant image).
-2. An `ir.cron` job processes the queue in small batches so a 1,500-image
-   catalog can't time out the HTTP request that started the import.
-3. If you picked a `product.media.source` (an Alist connection already set
-   up through `media_picker`) in the wizard: the image is downloaded,
-   `PUT`-uploaded to Alist, resolved to a trusted direct URL via
-   `media_picker`'s own `pem_alist_client.get_file`, and handed to
-   `product.template.upsert_external_media_from_shopify` — the exact
-   integration point `media_picker` defines for Shopify-style imports.
-4. Otherwise (or if step 3 fails for a given image), it falls back to a
-   standard Odoo binary image, so the catalog is never left without pictures.
+Images are queued by the import and processed in the background (progress on
+the batch page). With an object-storage source selected in the wizard, each
+image is:
 
-No QWeb template overrides live in this module — the storefront gallery
-display is entirely `media_picker`'s own, already-verified code.
+1. downloaded from Shopify in **original** size (size, SHA-256 and pixel
+   dimensions are recorded);
+2. uploaded to the object storage through `media_picker`'s
+   `media.source.upload_media()` — this module has no storage client or
+   credentials of its own; the returned CDN URL is recorded as the backup;
+3. shown on the storefront through a `media.bind` row that points at the
+   **Shopify CDN URL** first;
+4. for the main image, flagged `is_main` so `media_picker` syncs it into the
+   product's own `image_1920`; other images are not stored locally.
 
----
+A failed upload doesn't block anything: the image still displays from Shopify
+and is flagged "no backup" until it is re-uploaded.
+
+**Failover.** When `media_picker`'s link health check marks a Shopify URL
+`broken`, or a verification gets an explicit 404/410 from Shopify, the
+`media.bind` URL is switched to the object-storage CDN URL. Timeouts and
+connection errors never count as "gone". Images without a backup are flagged.
+Switching back is manual.
+
+**Image ledger** ("Shopify 导入 → 图片台账"): one row per image with the state of
+the Shopify source, the object-storage backup and the local copy, which URL is
+currently displayed, and a verdict. Rows can be re-uploaded (relayed from
+Shopify, or from the local copy when Shopify is gone), verified, re-fetched, or
+switched between display sources — all as background jobs.
+
+Without a source selected, images are downloaded at 1920 px and stored as
+ordinary Odoo images.
 
 ## Running the tests
 
@@ -140,8 +157,8 @@ DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=odoo DB_PASSWORD=odoo ./dev/run_tests.sh
 
 The suite installs the module next to `dev/stub_addons/media_picker` (a test
 double; set `MEDIA_PICKER_DIR=/path/to/media_picker` to test against the real
-addon) and mocks all network calls (Shopify image downloads, Alist upload,
-`get_file`). The same script runs in GitHub Actions on every push / PR.
+addon) and mocks all network calls (Shopify image downloads, link checks, the
+object-storage upload). The same script runs in GitHub Actions on every push / PR.
 
 ---
 
@@ -160,7 +177,7 @@ steps the script gives you for free.
 | Component | Expectation |
 |---|---|
 | Odoo | 19.0 Community, `website_sale` installed |
-| Required dependency | `media_picker` (for the `media.bind` / `product.media.source` API this module calls; the image pipeline falls back to binary storage if you never select a source, but the module still won't install without the addon present) |
+| Required dependency | `media_picker` **≥ 19.0.3.8** (`media.source.upload_media`, `media.bind` link health, main-image sync). For media_picker 3.4.x use `shopify_csv_import` 19.0.1.1.1 |
 
 ---
 

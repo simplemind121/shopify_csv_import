@@ -29,10 +29,10 @@ class ShopifyImportBatch(models.Model):
     csv_file = fields.Binary(string='CSV 文件', attachment=True, readonly=True)
     csv_filename = fields.Char(string='文件名', readonly=True)
     media_source_id = fields.Many2one(
-        'product.media.source', string='Alist 图片源', readonly=True,
-        help='留空表示图片直接存成 Odoo 本地二进制图片。')
+        'media.source', string='对象存储图片源', readonly=True,
+        help='留空表示图片直接存成 Odoo 本地图片。')
     alist_upload_path_prefix = fields.Char(
-        string='Alist 上传路径前缀', default='/b2/shopify-products', readonly=True)
+        string='上传文件夹', default='shopify-products', readonly=True)
 
     state = fields.Selection([
         ('queued', '排队中'),
@@ -64,9 +64,13 @@ class ShopifyImportBatch(models.Model):
     img_total = fields.Integer(string='图片总数', compute='_compute_progress')
     img_pending = fields.Integer(string='待处理', compute='_compute_progress')
     img_done = fields.Integer(string='已完成', compute='_compute_progress')
-    img_cdn = fields.Integer(string='已上传 Alist', compute='_compute_progress')
-    img_binary = fields.Integer(string='本地存储', compute='_compute_progress')
-    img_fallback = fields.Integer(string='CDN 失败回退本地', compute='_compute_progress')
+    img_cdn = fields.Integer(string='已备份到对象存储', compute='_compute_progress')
+    img_binary = fields.Integer(string='本地图片', compute='_compute_progress')
+    img_fallback = fields.Integer(string='缺备份', compute='_compute_progress')
+    img_display_shopify = fields.Integer(string='显示 Shopify 链接', compute='_compute_progress')
+    img_display_backup = fields.Integer(string='显示对象存储链接', compute='_compute_progress')
+    img_source_gone = fields.Integer(string='Shopify 已失效', compute='_compute_progress')
+    img_lost = fields.Integer(string='已失效且无备份', compute='_compute_progress')
     img_error = fields.Integer(string='失败', compute='_compute_progress')
     product_progress = fields.Float(string='商品进度', compute='_compute_progress')
     image_progress = fields.Float(string='图片进度', compute='_compute_progress')
@@ -90,6 +94,23 @@ class ShopifyImportBatch(models.Model):
             for batch, count in Queue._read_group(
                     [('batch_id', 'in', ids), ('cdn_error', '!=', False)], ['batch_id'], ['__count']):
                 stats.setdefault(batch.id, {})['fallback'] = count
+            # 旧版本留下的"上传失败后回退成本地图片"的记录：既是本地图片又缺备份，
+            # 进度条里只算进"缺备份"，不重复算进"本地图片"
+            for batch, count in Queue._read_group(
+                    [('batch_id', 'in', ids), ('cdn_error', '!=', False), ('storage', '=', 'binary'),
+                     ('state', '=', 'done')], ['batch_id'], ['__count']):
+                stats.setdefault(batch.id, {})['legacy_fallback'] = count
+            for batch, display, count in Queue._read_group(
+                    [('batch_id', 'in', ids), ('display_source', '!=', False)],
+                    ['batch_id', 'display_source'], ['__count']):
+                stats.setdefault(batch.id, {})[f'display_{display}'] = count
+            for batch, source_state, verdict, count in Queue._read_group(
+                    [('batch_id', 'in', ids), ('source_state', '=', 'gone')],
+                    ['batch_id', 'source_state', 'verdict'], ['__count']):
+                s = stats.setdefault(batch.id, {})
+                s['gone'] = s.get('gone', 0) + count
+                if verdict == 'lost':
+                    s['lost'] = s.get('lost', 0) + count
         now = fields.Datetime.now()
         for batch in self:
             s = stats.get(batch.id, {})
@@ -100,8 +121,12 @@ class ShopifyImportBatch(models.Model):
             batch.img_error = error
             batch.img_pending = pending
             batch.img_cdn = s.get('cdn', 0)
-            batch.img_binary = s.get('binary', 0)
+            batch.img_binary = s.get('binary', 0) - s.get('legacy_fallback', 0)
             batch.img_fallback = s.get('fallback', 0)
+            batch.img_display_shopify = s.get('display_shopify', 0)
+            batch.img_display_backup = s.get('display_backup', 0)
+            batch.img_source_gone = s.get('gone', 0)
+            batch.img_lost = s.get('lost', 0)
             batch.product_progress = (
                 100.0 * batch.next_index / batch.total_products if batch.total_products
                 else (100.0 if batch.state not in ('queued', 'importing') else 0.0))
@@ -306,12 +331,27 @@ class ShopifyImportBatch(models.Model):
         return self._notify(f'{len(rows)} 张失败图片已重新排队，后台会继续处理。')
 
     def action_retry_cdn_fallback(self):
-        """改好 Alist 配置后，把之前回退成本地的图片重新上传到 Alist。
-        上传成功后会自动删掉当时存的本地附加图，不会重复。"""
-        rows = self.queue_ids.filtered(lambda q: q.cdn_error and q.media_source_id)
-        rows.write({'state': 'pending', 'error_message': False, 'cdn_error': False})
-        self._reopen_for_images(f'{len(rows)} 张回退本地的图片重新排队上传 Alist')
-        return self._notify(f'{len(rows)} 张图片已重新排队上传 Alist。')
+        """中继：把缺备份的图片补传到对象存储（改好图片源配置后用）。
+        Shopify 源还在就从 Shopify 拉原图，已经失效的主图改用本地那份。"""
+        rows = self.queue_ids.filtered(
+            lambda q: q.media_source_id and q.backup_state != 'ok' and q.state != 'pending')
+        rows.write({'job': 'backup', 'state': 'pending', 'error_message': False})
+        self._reopen_for_images(f'{len(rows)} 张缺备份的图片重新排队上传对象存储')
+        return self._notify(f'{len(rows)} 张图片已排队补传到对象存储。')
+
+    def action_verify(self):
+        """对账：逐张检查 Shopify 源和对象存储备份，在后台进行。"""
+        rows = self.queue_ids.filtered(lambda q: q.state != 'pending' and q.media_source_id)
+        rows.write({'job': 'verify', 'state': 'pending', 'error_message': False})
+        self._reopen_for_images(f'{len(rows)} 张图片排队对账')
+        return self._notify(f'{len(rows)} 张图片已排队对账，结果看「图片台账」的「对账结论」。')
+
+    def action_failover(self):
+        """把 Shopify 链接已经失效的图片，立刻换成对象存储的备份链接。"""
+        switched = self.env['shopify.image.queue']._cron_failover()
+        return self._notify(
+            f'已把 {switched} 张 Shopify 失效的图片切到对象存储链接。' if switched
+            else '没有需要切换的图片（Shopify 链接都还在，或失效的图片没有备份）。')
 
     def _reopen_for_images(self, message):
         for batch in self:
@@ -361,7 +401,8 @@ class ShopifyImportBatch(models.Model):
         fnames = ['name', 'state', 'paused', 'status_message', 'total_products', 'next_index',
                   'created_count', 'updated_count', 'error_count', 'warning_count',
                   'img_total', 'img_pending', 'img_done', 'img_cdn', 'img_binary', 'img_fallback',
-                  'img_error', 'product_progress', 'image_progress', 'progress',
+                  'img_error', 'img_display_shopify', 'img_display_backup', 'img_source_gone',
+                  'img_lost', 'product_progress', 'image_progress', 'progress',
                   'speed_text', 'eta_text', 'last_error', 'media_source_id']
         data = batch.read(fnames)[0]
         data['state_label'] = dict(self._fields['state'].selection).get(batch.state)

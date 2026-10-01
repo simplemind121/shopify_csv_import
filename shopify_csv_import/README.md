@@ -5,11 +5,10 @@ website_sale 自建商城。
 
 ## 安装
 
-本模块依赖你现有的 `media_picker`（19.0.3.3.0），要先装 `media_picker`
-再装本模块。
+本模块依赖 `media_picker` **19.0.3.8 或更高版本**（用它的 `media.source` 上传接口、
+外链健康检查、主图同步）。旧版 media_picker（3.4.x）请用本模块的 19.0.1.1.1。
 
-1. 把这个 `shopify_csv_import` 文件夹整个复制到
-   `/opt/prod-apps/odoo/addons/`（对应容器内的 `/mnt/extra-addons`）
+1. 把这个 `shopify_csv_import` 文件夹整个复制到 Odoo 的 addons 目录
 2. 重启 Odoo 容器，或在「设置 -> 技术 -> 应用」里点「更新应用列表」
 3. 在「应用」里搜索「Shopify CSV 商品导入」，安装
 4. 安装完成后顶部菜单会出现「Shopify 导入」
@@ -17,17 +16,10 @@ website_sale 自建商城。
 ## 使用
 
 1. 点顶部菜单「Shopify 导入」（打开的是「导入记录」列表），点左上角「导入 Shopify CSV」，上传 Shopify 导出的 CSV
-2. 想让图片直接走你的 Alist/B2 CDN，就在「图片存到哪个 Alist 图片源」里选
-   你后台已经配置好的那个 `product.media.source` 记录（就是你现在
-   media_picker 后台里手动选图用的那个连接）；不选就是所有图片直接存成
-   Odoo 本地二进制图片，两种都能正常显示，CDN 只是可选项
-3. 点「开始导入」——几秒到几十秒内 284 个商品的基础信息、变体、分类、
-   标签都会建好，可以立刻去「网站 -> 电商」里看
-4. 图片不会在这一步里同步完（避免请求超时），而是进入「图片同步队列」（进度在「导入记录」页面里看），
-   后台定时任务每分钟启动一次，8 张并行下载、逐张提交，每次最多用 cron 超时时间的一半（默认约 60 秒）；实测 284 个商品 / 1582 张图约 40 分钟同步完；也可以在导入结果页点
-   「立即同步一批图片」手动催一下
-5. 「Shopify 导入」->「图片同步队列」可以看每张图片的同步状态，失败的
-   点开记录点「重试」
+2. 「图片备份到哪个对象存储」：选 media_picker 里已经配置好、并开启了「允许上传」的图片源
+   （Alist / S3）。不选就是所有图片直接存成 Odoo 本地图片
+3. 点「开始导入」，会进入这次导入的进度页面；商品和图片都在后台处理，可以关掉页面
+4. 「Shopify 导入 -> 图片台账」可以看每张图片在各处的状态，并做上传、对账、切换显示来源
 
 ## 进度怎么看（关掉页面也没关系）
 
@@ -50,33 +42,49 @@ website_sale 自建商城。
 
 ## 图片存储：接的是你现有的 media_picker，不是我自己另搭一套
 
-上一版我曾经打算自己加字段存外链 URL，但发现你这个 media_picker 包
-（19.0.3.3.0）里已经有专门给 Shopify 导入用的接口，所以现在直接复用它，
-没有再造轮子：
+选了对象存储之后，每张图这样处理：
 
-- 选了「Alist 图片源」之后，每张图片会：下载字节 → `PUT` 到 Alist（
-  `models/shopify_image_queue.py` 里的 `_alist_put`，这是本模块唯一
-  自己写的网络调用，因为 media_picker 本身只有"挑选已存在文件"，没有
-  上传） → 用 media_picker 自带、已经在生产验证过的 `pem_alist_client.get_file`
-  解析出最终直链，并用该图片源自己的 `_check_domain_trusted()` 校验域名
-  → 调 `product.template.upsert_external_media_from_shopify(...)`
-  写入 `media.bind`，并把 `use_external_media` 置为 `True`
-- 网站商品页怎么显示外链图片，完全是 media_picker 自己现成的逻辑
-  （`_get_images` / `_get_website_main_image_source` 等），本模块不用碰
-  任何 QWeb 模板
-- 没选图片源，或者上传/解析失败，就直接下载存成 Odoo 标准二进制图片
-  （`image_1920` / `product.image`），保证图片总归能正常显示
+1. 从 Shopify 下载**原图**，记下大小、SHA-256、像素尺寸
+2. 通过 media_picker 的 `media.source.upload_media()` 上传到对象存储，记下它的 CDN 直链
+   （同一个商品里指向同一张图的变体图 / 画廊图只传一次）
+3. 前台显示用的链接（media_picker 的 `media.bind`）**先写 Shopify 的 CDN 链接**
+4. 主图标成 `is_main`，media_picker 会自动把它同步进商品的本地图片（后台列表、订单、
+   邮件等读本地图的地方都能用）；**其余图片不存本地**
+5. 上传失败不影响显示（Shopify 链接还在），这张图标成「缺备份」，配置改好后点「补传」
 
-**Alist token 要配对**：上传需要**有写权限**的 token。token 的读取方式和
-media_picker 一样——`secret_ref` 填的是**环境变量名**（优先），否则用 `alist_token`
-字段。不要把 token 本身填进 `secret_ref`：那样 media_picker 的「测试连接」仍然会
-成功（读目录用访客权限就行），但上传会被拒绝（403）。CDN 失败时图片会自动回退成
-本地二进制，「图片同步队列」里的「存储位置」「CDN 失败原因」两列会写明原因。
+**Shopify 链接失效后**：media_picker 的链接健康检查把某条 Shopify 外链判成 broken，或者
+本模块对账时 Shopify 明确返回 404/410，就把这条外链换成对象存储的 CDN 直链。超时、
+连接失败这类不算失效。没有备份可换的会标成「Shopify 已失效且无备份」。切过去之后不会
+自动切回，需要时在台账里手动「显示改用 Shopify」。
 
-**用之前确认一下**：你选的那个 `product.media.source` 记录上的
-`trusted_domains` 字段（或者全局系统参数 `media_picker.trusted_domains`）
-要包含 `media.051288888.xyz`，不然域名校验会失败，自动回退成本地二进制——
-这个如果你现有商品图片已经在正常显示外链，大概率已经配好了，不用改。
+没选对象存储：所有图片下载 1920px 版本后存成 Odoo 本地图片（`image_1920` / `product.image`）。
+
+### 图片台账（三方对照）
+
+「Shopify 导入 -> 图片台账」每张图一行：
+
+| 列 | 含义 |
+|---|---|
+| Shopify 源 | 原图链接还在不在 |
+| 对象存储备份 | 已备份 / 上传失败 / 备份文件不见了 / 大小不一致 |
+| 本地图片 | 只有主图存本地 |
+| 前台显示来源 | 现在显示的是 Shopify 链接还是对象存储链接 |
+| 对账结论 | 一致 / 缺备份 / 备份丢失 / 不一致 / Shopify 已失效（备份已接替）/ 已失效且无备份 |
+
+点开一行是三栏对照（Shopify 源、对象存储备份、Odoo 本地），各有预览图、大小、检查时间。
+
+勾选图片后可以做的操作（都在后台执行，进度在导入记录页面看）：
+
+- **上传到对象存储**：中继。Shopify 源还在就从 Shopify 拉原图；已经失效的主图改用本地那份
+- **对账**：检查 Shopify 源和对象存储备份是否都在、备份大小和原图是否一致
+- **重新拉取原图**：Shopify 那边换了图之后用，覆盖备份和显示链接
+- **显示改用对象存储 / 显示改用 Shopify**：手动切换前台显示来源
+
+导入记录页面上有批次级的按钮：补传缺备份的图片、对账、切换失效链接。
+
+**用之前确认**：图片源要开启「允许上传」，token 要有写权限；如果 media_picker 配了全局
+可信域名名单（系统参数 `media_picker.trusted_domains`），里面要有 `cdn.shopify.com`
+（没有的话导入向导会直接提示）。
 
 ## CSV 字段映射（供核对）
 
@@ -96,7 +104,7 @@ media_picker 一样——`secret_ref` 填的是**环境变量名**（优先）�
 | Cost per item | `standard_price` |
 | Variant Barcode | `barcode` |
 | Variant Grams | `weight`（换算 kg） |
-| Image Src（按 Image Position 排序） | 进图片同步队列，见上文 |
+| Image Src（按 Image Position 排序） | 进图片台账，后台同步，见上文 |
 | Variant Image | 少量有值的会挂到对应变体 |
 | Tags | `product.tag`（和 Vendor 一起，脏数据也原样导入，你说了自己后台清理） |
 | Gift Card / SEO Description / Google Shopping / 各类 metafields | 未使用（数据基本为空，用不上） |
@@ -104,22 +112,19 @@ media_picker 一样——`secret_ref` 填的是**环境变量名**（优先）�
 ## 测试
 
 仓库根目录执行 `./dev/run_tests.sh`，会在一个临时 Odoo 19 数据库里跑
-`tests/` 下的 53 个用例（CSV 解析、单/多变体、价格换算、分类、标签、重复导入、
+`tests/` 下的 66 个用例（CSV 解析、单/多变体、价格换算、分类、标签、重复导入、
 单个商品失败隔离、图片队列、Alist/media_picker 链路，网络全部 mock）。
 详见仓库根目录 README 的「运行测试」一节。
 
 ## 已知限制 / 后续可以优化的点
 
-- **上传接口是我按 Alist v3 文档写的（`PUT /api/fs/put`，Header 带
-  `File-Path` + `Authorization`），没在真实环境跑过**——media_picker 自己
-  的代码里只有读（list/get），没有现成的上传可以照抄。如果你的 Alist
-  版本这个接口不一样，第一次导入图片会在「图片同步队列」里显示上传失败，
-  改 `models/shopify_image_queue.py` 的 `_alist_put` 方法就行，改完不影响
-  已经导入的商品/变体数据
-- 每个商品的导入用了 savepoint（`with self.env.cr.savepoint()`），单个
-  商品失败不会拖垮整批；但没有做分页/分批 commit，284 个商品量级没问题，
-  以后 CSV 涨到几千个商品建议改成分批 commit
-- Vendor 判定"是不是网址"用的是简单正则（含 `http`/`www.`/`1688.com`/
-  `alibaba.com`），CSV 里如果出现别的脏数据格式需要再补规则
-- 图片同步失败（比如 Shopify 图片链接过期，或者上面说的 Alist 接口对不上）
-  会停在「图片同步队列」里显示失败原因，需要人工看一下要不要重试或者换图
+- **对象存储上传还没在真实的 Alist / S3 上跑过**：上传走的是 media_picker 官方的
+  `media.source.upload_media()`，自动化测试和端到端测试里这一步是模拟的。第一次用请先
+  拿几个商品试，在图片台账里确认「对象存储备份」是「已备份」
+- Shopify 失效切到对象存储后，media_picker 要重新同步一次主图，才会重新把本地主图和
+  外链主图认成同一张；这之前主图可能在画廊里短暂出现两次
+- 变体价格只能表达成"基础价 + 属性加价"，只有某一个组合单独加价的价格表会按最接近的
+  结果导入并在导入日志里标 `[警告]`
+- 划线价（Compare At Price）、税率（Variant Taxable）、库存没有映射
+- Vendor 判定"是不是网址"用的是简单正则，CSV 里如果出现别的脏数据格式需要再补规则
+- 对账比的是文件大小（备份和下载到的原图）；逐字节 / 视觉指纹的深度对账还没做

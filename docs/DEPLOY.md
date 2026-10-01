@@ -3,13 +3,15 @@
 ## Prerequisites
 
 - Docker-based Odoo 19 (`prod-odoo` or a staging equivalent)
-- `media_picker` already installed in the target database (this module
-  depends on it for the optional Alist/B2 CDN image path)
+- `media_picker` **19.0.3.8 or newer** already installed in the target database
+  (this module uses its `media.source` upload API, link health checks and
+  main-image sync; with media_picker 3.4.x use shopify_csv_import 19.0.1.1.1)
 - Addons directory mounted and writable by the deploy user (script uses `sudo`)
 - Package + script in the **same directory**
-- If you want CDN image sync: network access from Odoo to your Alist instance,
-  and an existing, working `product.media.source` record (created through
-  `media_picker`'s own admin UI)
+- For object-storage backup: a `media.source` (Alist / S3) configured in
+  media_picker with **uploads enabled** and credentials that can write. If
+  media_picker's global trusted-domain list (`media_picker.trusted_domains`) is
+  set, it must include `cdn.shopify.com`.
 
 ## Install or upgrade
 
@@ -29,7 +31,7 @@ Other options:
 ```bash
 sudo ./deploy_shopify_csv_import.sh --container my-odoo   # explicit container name
 sudo ./deploy_shopify_csv_import.sh --db mydb              # explicit database
-sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.1.1.1.zip
+sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.2.0.0.zip
 sudo ./deploy_shopify_csv_import.sh --force                # allow same/older-version reinstall
 sudo ./deploy_shopify_csv_import.sh --no-backup            # skip pre-deploy backup (not recommended)
 sudo ./deploy_shopify_csv_import.sh --rollback              # restore the most recent backup
@@ -55,14 +57,15 @@ The script:
 
 ## Post-deploy checklist
 
-1. Apps → `shopify_csv_import` version = **19.0.1.1.1**
+1. Apps → `shopify_csv_import` version = **19.0.2.0.0**
 2. Top menu "Shopify 导入" opens the "导入记录" list, with the "导入 Shopify CSV" button (admin only)
-3. Import a small test CSV (a handful of products) without selecting an Alist
-   image source first — confirm products/variants/categories/tags appear
+3. Import a small test CSV (a handful of products) without selecting an
+   object-storage source first — confirm products/variants/categories/tags appear
    correctly and images land as standard Odoo binary images
-4. If you use the CDN path: re-run the import (or a subset) with a
-   `product.media.source` selected, confirm entries show up in "图片同步队列"
-   as `done`, and that the product's storefront gallery shows the CDN image
+4. If you use object storage: import a few products with the source selected.
+   In "图片台账" every row should show 对象存储备份 = 已备份 and 前台显示来源 =
+   Shopify CDN; the product page shows the local main image followed by the
+   Shopify-hosted gallery. Run "对账" on the batch and confirm 对账结论 = 一致
 5. Re-import the same CSV once more — confirm it **updates** existing
    products (same count of products, no duplicates)
 
@@ -78,14 +81,17 @@ confirm, since this overwrites everything written since that backup.
 
 ## Configuration notes
 
-- This module stores no credentials of its own. The Alist connection used
-  for CDN image sync is whichever `product.media.source` record you pick in
-  the import wizard — manage its URL/token through `media_picker`'s own UI.
+- This module stores no credentials of its own. Uploads go through the
+  `media.source` you pick in the import wizard — manage its URL, credentials
+  and upload setting in media_picker.
 - `ir.cron` "Shopify 导入批次" imports the products of uploaded CSVs (it is
   triggered immediately on upload, and checks every minute). Progress for every
   import is at "Shopify 导入" → "导入记录" (the default page of the menu). Both crons are `noupdate`:
   disabling one or changing its interval survives upgrades — the batch page
   warns when a cron a batch needs is disabled.
+- `ir.cron` "Shopify 图片失效切换" (every 10 minutes) switches images whose
+  Shopify link is confirmed dead to the object-storage backup. The detection
+  itself is media_picker's link health check (its own cron and settings).
 - `ir.cron` "Shopify 图片同步" starts every minute. Each run downloads 8 images
   in parallel, commits after every image, and stops starting new images once
   it has used half of the cron time limit (`limit_time_real_cron`, falling back

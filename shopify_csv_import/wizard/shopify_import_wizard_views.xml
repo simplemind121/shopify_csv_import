@@ -12,6 +12,13 @@
                     <field name="media_source_id"/>
                     <field name="alist_upload_path_prefix" invisible="not media_source_id"/>
                 </group>
+                <div class="text-muted" invisible="not media_source_id">
+                    选了对象存储：所有图片上传到对象存储做备份；前台先用 Shopify 的 CDN 链接显示，
+                    Shopify 链接失效后自动换成对象存储的直链；主图另外同步一份到 Odoo 本地。
+                </div>
+                <div class="text-muted" invisible="media_source_id">
+                    没选对象存储：所有图片直接存成 Odoo 本地图片。
+                </div>
                 <div class="text-muted">
                     点「开始导入」后会建一个导入批次，商品和图片都在后台处理。
                     可以直接关掉页面，随时在「Shopify 导入 → 导入记录」查看进度。

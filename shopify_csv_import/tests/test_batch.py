@@ -10,7 +10,6 @@ from odoo.tools import mute_logger
 from .common import ShopifyImportCase, fake_response, png_bytes
 
 QUEUE_MODULE = 'odoo.addons.shopify_csv_import.models.shopify_image_queue'
-ALIST_CLIENT = 'odoo.addons.media_picker.models.pem_alist_client.get_file'
 
 
 @tagged('post_install', '-at_install', 'shopify_csv_import')
@@ -115,31 +114,61 @@ class TestShopifyImportBatch(ShopifyImportCase):
             self.Queue._cron_process_pending(limit=30)
         self.assertEqual((batch.state, batch.img_error, batch.img_done), ('done', 0, 5))
 
-    def test_09_retry_cdn_fallback_replaces_local_copy(self):
-        """token 没配对时回退本地；改好后「重新上传回退本地的图片」：
-        上到 Alist，并删掉当时存的本地附加图，画廊里不重复。"""
-        source = self.env['product.media.source'].create({
-            'name': 'Test Alist', 'alist_url': 'https://alist.example.com',
-            'trusted_domains': 'media.example.com',
-        })
+    def test_09_push_missing_backups(self):
+        """图片源没配好时图片缺备份（照样能显示）；配好后「补传缺备份的图片」把它们传上去。"""
+        source = self._media_source()
         batch = self._run_import(media_source_id=source.id)
-        mug = self._tmpl('sci-test-mug')
-        with self._mock_get():  # 没 token：回退本地
+        with self._mock_get(), self._mock_upload(fail='401 token invalid'):
             self.Queue._cron_process_pending(limit=30)
         self.assertEqual((batch.state, batch.img_fallback, batch.img_cdn), ('done', 5, 0))
-        self.assertEqual(len(mug.product_template_image_ids), 1)
+        self.assertEqual(batch.img_display_shopify, 5, '缺备份不影响显示')
+        self.assertIn('401', batch.last_error)
 
-        source.alist_token = 'fixed-token'
         batch.action_retry_cdn_fallback()
         self.assertEqual(batch.state, 'syncing')
-        put_resp = fake_response(json_data={'code': 200})
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
-                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/x.jpg'}):
+        self.assertEqual(set(batch.queue_ids.mapped('job')), {'backup'})
+        with self._mock_get(), self._mock_upload():
             self.Queue._cron_process_pending(limit=30)
         self.assertEqual((batch.state, batch.img_cdn, batch.img_fallback), ('done', 5, 0))
-        self.assertFalse(mug.product_template_image_ids, '本地附加图副本应被删除')
+        self.assertEqual(set(batch.queue_ids.mapped('verdict')), {'ok'})
+
+    def test_09b_local_images_move_to_object_storage(self):
+        """旧数据迁移：本地模式导入的图片，之后改走对象存储——附加图的本地副本要删掉。"""
+        batch = self._run_import()  # 没选图片源：全部存本地
+        with self._mock_get():
+            self.Queue._cron_process_pending(limit=30)
+        mug = self._tmpl('sci-test-mug')
+        self.assertEqual(len(mug.product_template_image_ids), 1)
+        self.assertEqual(batch.img_binary, 5)
+        self.assertEqual(set(batch.queue_ids.mapped('verdict')), {'local'})
+
+        source = self._media_source()
+        batch.media_source_id = source
+        batch.queue_ids.write({'media_source_id': source.id})
+        batch.action_retry_cdn_fallback()
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual((batch.state, batch.img_cdn, batch.img_binary), ('done', 5, 0))
+        self.assertFalse(mug.product_template_image_ids, '附加图的本地副本应被删除')
+        self.assertTrue(mug.image_1920, '主图的本地那份保留')
         self.assertEqual(len(self.env['media.bind'].search([('product_tmpl_id', '=', mug.id)])), 2)
+
+    def test_09c_verify_and_failover_from_batch(self):
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.env['media.bind'].search([('product_tmpl_id', '=', self._tmpl('sci-test-mug').id)]).write(
+            {'health_status': 'broken'})
+        action = batch.action_failover()
+        self.assertEqual(action['tag'], 'display_notification')
+        batch.invalidate_recordset()
+        self.assertEqual((batch.img_display_backup, batch.img_display_shopify, batch.img_source_gone), (2, 3, 2))
+        snap = batch.get_progress_snapshot(batch.id)
+        self.assertEqual((snap['img_display_backup'], snap['img_source_gone'], snap['img_lost']), (2, 2, 0))
+        batch.action_verify()
+        self.assertEqual(batch.state, 'syncing')
+        self.assertEqual(set(batch.queue_ids.mapped('job')), {'verify'})
 
     def test_10_batch_without_images_finishes_immediately(self):
         batch = self._run_import(self._csv('noimg,No Image,,,,,TRUE,Title,Default Title,,,N-1,,5,,,,,,active'))

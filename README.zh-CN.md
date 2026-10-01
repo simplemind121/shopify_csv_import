@@ -1,10 +1,10 @@
 # shopify_csv_import
 
-**Odoo 19 · 把 Shopify 导出的商品 CSV 一键导入 `website_sale`（自建商城）· 可选接入 `media_picker` 走 Alist/B2 CDN 图片**
+**Odoo 19 · 把 Shopify 导出的商品 CSV 一键导入 `website_sale`（自建商城）· 图片经 `media_picker` 备份到对象存储，前台优先用 Shopify CDN**
 
 | 项目 | 内容 |
 |---|---|
-| **最新版本** | [`19.0.1.1.1`](./CHANGELOG.md#19111---2026-10-01) |
+| **最新版本** | [`19.0.2.0.0`](./CHANGELOG.md#19200---2026-10-01) |
 | **模块技术名** | `shopify_csv_import` |
 | **Odoo** | 19 社区版 |
 | **依赖** | `website_sale`、`product`、`media_picker` |
@@ -59,7 +59,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 
 ---
 
-## 功能矩阵（当前版本 19.0.1.1.1）
+## 功能矩阵（当前版本 19.0.2.0.0）
 
 | 功能 | 状态 |
 |---|---|
@@ -70,11 +70,14 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 | 幂等重复导入（按 Handle 去重） | 支持 |
 | 后台导入批次 + 实时进度页面（暂停 / 继续 / 重试） | 支持 |
 | 基于 `ir.cron` 队列的异步图片同步 | 支持 |
-| 二进制图片兜底（没配 Alist 时） | 支持 |
-| 经 `media_picker` 的 `media.bind` 走 Alist/B2 CDN 图片同步 | 支持 |
+| 本地图片（不选对象存储时） | 支持 |
+| 所有图片经 `media_picker` 的 `media.source` 备份到对象存储（Alist / S3） | 支持 |
+| 前台先用 Shopify CDN 显示，Shopify 链接失效后自动换成对象存储 CDN | 支持 |
+| 主图另存本地（由 `media_picker` 同步），其余图片只走外链 | 支持 |
+| 图片台账：每张图的源 / 备份 / 本地状态、对账、中继上传、手动切换显示来源 | 支持 |
 | 划线原价 / 礼品卡 / SEO metafields | 未映射（当前场景用不上） |
 | 超大商品目录的分批提交 | 支持（按时间预算分段执行，可续跑） |
-| 在真实 Odoo 19 数据库上的自动化测试 | 有——53 个用例，并用真实的 284 个商品的 Shopify 导出实测过，见下文 |
+| 在真实 Odoo 19 数据库上的自动化测试 | 有——66 个用例（测试替身和真实 `media_picker` 3.8.2 各跑一遍），并用真实的 284 个商品的 Shopify 导出实测过 |
 
 ---
 
@@ -82,7 +85,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 
 ```bash
 # 1) clone 这个仓库，或者从 Release 里下载：
-#    shopify_csv_import-19.0.1.1.1.zip
+#    shopify_csv_import-19.0.2.0.0.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) 两个文件放同一目录，在 VPS 上执行
@@ -100,22 +103,26 @@ sudo ./deploy_shopify_csv_import.sh                     # 确认没问题再上�
 
 ## 图片这条链路是怎么走的
 
-1. 导入向导把 CSV 里每张图片的 URL 存进一条 `shopify.image.queue` 记录
-   （主图 / 附加图片 / 变体图片）。
-2. `ir.cron` 定时任务小批量处理这个队列，避免上千张图片把发起导入的那次
-   HTTP 请求拖到超时。
-3. 如果向导里选了一个 `product.media.source`（`media_picker` 里已经配好
-   的 Alist 连接）：下载图片 → `PUT` 上传到 Alist → 用 `media_picker` 自带的
-   `pem_alist_client.get_file` 解析出可信直链 → 交给
-   `product.template.upsert_external_media_from_shopify`——这正是
-   `media_picker` 自己为 Shopify 类型导入定义的接入点。
-4. 否则（或者某张图第 3 步失败），直接兜底存成 Odoo 标准二进制图片，
-   保证商品目录不会因为这个环节而缺图。
+图片由导入排队、后台处理（进度在导入记录页面看）。向导里选了对象存储后，每张图：
 
-这个模块里没有任何 QWeb 模板 override——商城前台怎么显示图片，完全是
-`media_picker` 自己那套已经验证过的代码。
+1. 从 Shopify 下载**原图**，记下大小、SHA-256、像素尺寸
+2. 通过 `media_picker` 的 `media.source.upload_media()` 上传到对象存储——本模块自己没有
+   存储客户端，也不碰凭证；返回的 CDN 直链记为备份
+3. 前台显示用的 `media.bind` **先写 Shopify 的 CDN 链接**
+4. 主图标成 `is_main`，`media_picker` 会把它同步进商品自己的 `image_1920`；其余图片不存本地
 
----
+上传失败不影响显示：图片照样从 Shopify 显示，标成「缺备份」，之后补传。
+
+**失效切换**：`media_picker` 的链接健康检查把 Shopify 外链判成 `broken`，或者对账时
+Shopify 明确返回 404/410，就把 `media.bind` 的链接换成对象存储的 CDN 直链。超时、连接
+失败不算失效。没有备份的会被标出来。切回 Shopify 需要手动操作。
+
+**图片台账**（「Shopify 导入 → 图片台账」）：每张图一行，显示 Shopify 源、对象存储备份、
+本地图片各自的状态，现在显示的是哪条链接，以及对账结论。可以勾选后上传到对象存储
+（Shopify 源还在就从 Shopify 中继，失效的主图用本地那份）、对账、重新拉取原图、切换
+显示来源——都是后台任务。
+
+不选对象存储：图片下载 1920px 版本，存成普通的 Odoo 图片。
 
 ## 运行测试
 
@@ -132,7 +139,7 @@ DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=odoo DB_PASSWORD=odoo ./dev/run_tests.sh
 
 测试会把本模块和 `dev/stub_addons/media_picker`（media_picker 接口的测试替身，
 **只用于开发/CI，不要部署**；想用真实模块测就设 `MEDIA_PICKER_DIR=/path/to/media_picker`）
-一起装进一个临时数据库，所有网络调用（下载 Shopify 图片、Alist 上传、`get_file`）
+一起装进一个临时数据库，所有网络调用（下载 Shopify 图片、链接检查、对象存储上传）
 都是 mock 的。GitHub Actions 每次 push / PR 都会跑同一个脚本。
 
 ---
@@ -151,7 +158,7 @@ DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=odoo DB_PASSWORD=odoo ./dev/run_tests.sh
 | 组件 | 要求 |
 |---|---|
 | Odoo | 19.0 社区版，已装 `website_sale` |
-| 必需依赖 | `media_picker`（本模块调的是它的 `media.bind` / `product.media.source` 接口；就算你一直不选图片源、图片走二进制兜底，装模块时 `media_picker` 这个插件本身也必须已经在 addons 目录里） |
+| 必需依赖 | `media_picker` **≥ 19.0.3.8**（`media.source.upload_media`、`media.bind` 链接健康检查、主图同步）。media_picker 3.4.x 请用 `shopify_csv_import` 19.0.1.1.1 |
 
 ---
 

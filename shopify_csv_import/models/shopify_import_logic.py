@@ -590,9 +590,10 @@ class ShopifyImportLogic(models.AbstractModel):
     def _alist_target_path(self, tmpl, url):
         if not self.media_source_id:
             return False
-        prefix = (self.alist_upload_path_prefix or '/b2/shopify-products').rstrip('/')
+        # 相对图片源根目录的路径；真正的根目录、CDN 域名都由 media_picker 的图片源决定
+        folder = (self.alist_upload_path_prefix or 'shopify-products').strip('/')
         filename = url.split('/')[-1].split('?')[0] or 'image.jpg'
-        return f'{prefix}/{tmpl.id}_{filename}'
+        return f'{folder}/{tmpl.id}_{filename}'
 
     # =================================================================
     # 工具方法

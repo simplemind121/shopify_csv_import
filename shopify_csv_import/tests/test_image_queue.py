@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os
+import base64
 from unittest.mock import call, patch
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -17,7 +17,6 @@ def strip_resize(url):
     query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
              if k not in ('width', 'height')]
     return urlunparse(parts._replace(query=urlencode(query)))
-ALIST_CLIENT = 'odoo.addons.media_picker.models.pem_alist_client.get_file'
 
 
 @tagged('post_install', '-at_install', 'shopify_csv_import')
@@ -86,135 +85,123 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertEqual(first.state, 'error')
         self.assertEqual(self.Queue.search_count([('state', '=', 'done')]), 4)
 
-    def test_06_retry_processes_selected_record_only(self):
+    def test_06_retry_requeues_selected_record_only(self):
+        """「重新拉取原图」只把选中的图片重新排队（后台处理），别的不动。"""
         self._run_import()
         rows = self.Queue.search([], order='id')
+        rows.write({'state': 'done'})
         target = rows[-1]
-        target.write({'state': 'error', 'error_message': 'boom'})
-        with self._mock_get():
-            target.action_retry()
-        self.assertEqual(target.state, 'done')
+        target.write({'state': 'error', 'error_message': 'boom', 'job': 'verify'})
+        target.action_retry()
+        self.assertEqual((target.state, target.job), ('pending', 'sync'))
         self.assertFalse(target.error_message)
-        # 其它待处理记录没有被"顺带"处理
-        self.assertEqual(self.Queue.search_count([('state', '=', 'pending')]), len(rows) - 1)
+        self.assertEqual(set((rows - target).mapped('state')), {'done'})
+        with self._mock_get() as get:
+            self.assertEqual(self.Queue._cron_process_pending(limit=30), 1)
+        self.assertEqual(target.state, 'done')
+        self.assertEqual(get.call_count, 1)
 
     # ------------------------------------------------------------------
-    # Alist / media_picker 路径
+    # 对象存储备份 + Shopify 链接显示（media_picker 3.8 的 media.source / media.bind）
     # ------------------------------------------------------------------
-    def _alist_source(self, trusted='media.example.com'):
-        return self.env['product.media.source'].create({
-            'name': 'Test Alist',
-            'alist_url': 'https://alist.example.com/',
-            'alist_token': 'test-token',
-            'trusted_domains': trusted,
-        })
-
-    def test_07_alist_upload_and_media_bind(self):
-        source = self._alist_source()
-        self._run_import(media_source_id=source.id)
+    def _sync_mug(self, fail_upload=None, **wizard_vals):
+        source = self._media_source()
+        self._run_import(media_source_id=source.id, **wizard_vals)
         mug = self._tmpl('sci-test-mug')
         rows = self.Queue.search([('product_tmpl_id', '=', mug.id)], order='sequence')
-
-        put_resp = fake_response(json_data={'code': 200, 'message': 'success'})
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp) as put, \
-                patch(ALIST_CLIENT, side_effect=lambda src, path: {
-                    'raw_url': f'https://media.example.com/d{path}'}):
+        # 这组测试只关心杯子的两张图；其它商品的图片标成已完成，免得后面跑定时任务时被顺带处理
+        (self.Queue.search([]) - rows).write({'state': 'done'})
+        with self._mock_get() as get, self._mock_upload(fail=fail_upload):
             for rec in rows:
                 rec._process()
+        return source, mug, rows, get
 
+    def _binds(self, tmpl):
+        return self.env['media.bind'].search([('product_tmpl_id', '=', tmpl.id)], order='sequence, id')
+
+    def test_07_backup_to_object_storage_display_shopify(self):
+        """所有图上传对象存储；前台显示先写 Shopify 链接；非主图不存本地。"""
+        source, mug, rows, get = self._sync_mug()
         self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+
+        # 下的是原图（没有加 1920 缩放参数），每张只下一次、只传一次
+        self.assertEqual([c.args[0] for c in get.call_args_list], rows.mapped('source_url'))
+        self.assertEqual(len(self.uploads), 2)
+        self.assertEqual(self.uploads[0]['folder'], 'shopify-products')
+        self.assertEqual(self.uploads[0]['filename'], f'{mug.id}_mug-1.jpg')
+        self.assertEqual(self.uploads[0]['bytes'], self.png)
+        self.assertEqual(self.uploads[0]['size'], len(self.png))
+
+        main, extra = rows
+        self.assertEqual(set(rows.mapped('backup_state')), {'ok'})
+        self.assertEqual(main.backup_url, f'https://media.example.com/shopify-products/{mug.id}_mug-1.jpg')
         self.assertEqual(set(rows.mapped('storage')), {'cdn'})
-        self.assertFalse(any(rows.mapped('cdn_error')))
-        self.assertEqual(put.call_count, 2)
-        url, kwargs = put.call_args_list[0].args[0], put.call_args_list[0].kwargs
-        self.assertEqual(url, 'https://alist.example.com/api/fs/put')
-        self.assertEqual(kwargs['headers']['Authorization'], 'test-token')
-        self.assertEqual(kwargs['headers']['File-Path'],
-                         f'%2Fb2%2Fshopify-products%2F{mug.id}_mug-1.jpg')
+        self.assertEqual(set(rows.mapped('display_source')), {'shopify'})
+        self.assertEqual(set(rows.mapped('verdict')), {'ok'})
+        self.assertEqual(main.payload_size, len(self.png))
+        self.assertEqual((main.width, main.height), (4, 4))
+        self.assertEqual(len(main.payload_sha256), 64)
 
-        binds = self.env['media.bind'].search([('product_tmpl_id', '=', mug.id)], order='sequence')
+        binds = self._binds(mug)
         self.assertEqual(len(binds), 2)
-        self.assertTrue(binds[0].is_main)
-        self.assertEqual(binds[0].url, f'https://media.example.com/d/b2/shopify-products/{mug.id}_mug-1.jpg')
+        self.assertEqual(binds.mapped('url'), rows.mapped('source_url'), '前台先用 Shopify 链接')
+        self.assertEqual(binds.mapped('is_main'), [True, False])
+        self.assertFalse(binds.source_id, 'Shopify 链接不属于任何图片源')
+        self.assertEqual(rows.bind_id, binds)
         # 去重键忽略 ?v=，图片在 Shopify 更新过也能对上同一条 media.bind
-        self.assertEqual(binds[0].shopify_media_id, self.Queue._image_key(rows[0].source_url))
-        self.assertNotIn('v=', binds[0].shopify_media_id)
+        self.assertEqual(binds[0].shopify_media_id, self.Queue._image_key(main.source_url))
         self.assertTrue(mug.use_external_media)
-        self.assertFalse(mug.image_1920, 'CDN 成功时不应再存本地二进制')
+        self.assertFalse(mug.product_template_image_ids, '非主图不存本地')
 
-        # 再处理一次：按 shopify_media_id 去重，不会多出 media.bind
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
-                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/x.jpg'}):
-            rows.action_retry()
-        self.assertEqual(self.env['media.bind'].search_count([('product_tmpl_id', '=', mug.id)]), 2)
+        # 再同步一次：不会多出 media.bind
+        with self._mock_get(), self._mock_upload():
+            rows.write({'state': 'pending'})
+            for rec in rows:
+                rec._process()
+        self.assertEqual(len(self._binds(mug)), 2)
 
-    def test_08_untrusted_domain_falls_back_to_binary(self):
-        source = self._alist_source(trusted='media.example.com')
-        self._run_import(media_source_id=source.id)
+    def test_08_upload_failure_still_displays_via_shopify(self):
+        """对象存储传不上去：图片照样能显示（Shopify 链接），台账标成缺备份、写明原因。"""
+        _source, mug, rows, _get = self._sync_mug(fail_upload='403 permission denied')
+        self.assertEqual(set(rows.mapped('state')), {'done'})
+        self.assertEqual(set(rows.mapped('backup_state')), {'failed'})
+        self.assertEqual(set(rows.mapped('storage')), {'link'})
+        self.assertEqual(set(rows.mapped('verdict')), {'no_backup'})
+        self.assertIn('403', rows[0].cdn_error)
+        self.assertEqual(self._binds(mug).mapped('url'), rows.mapped('source_url'))
+        self.assertFalse(mug.product_template_image_ids, '缺备份也不再回退存本地')
+
+    def test_09_untrusted_shopify_domain_displays_backup(self):
+        """media_picker 的可信域名名单不认 Shopify 时：有备份就直接显示备份。"""
+        self.env['ir.config_parameter'].sudo().set_param('media_picker.trusted_domains', 'other.example.org')
+        source = self._media_source()
+        batch = self._start_import()
+        batch.media_source_id = source  # 绕过向导的事先检查，直接测处理逻辑
+        batch._run_products()
         mug = self._tmpl('sci-test-mug')
         main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
-        put_resp = fake_response(json_data={'code': 200})
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
-                patch(ALIST_CLIENT, return_value={'raw_url': 'https://evil.example.net/x.jpg'}):
+        with self._mock_get(), self._mock_upload():
             main._process()
-        self.assertEqual(main.state, 'done')
-        self.assertFalse(self.env['media.bind'].search([('product_tmpl_id', '=', mug.id)]))
-        self.assertTrue(mug.image_1920)
+        self.assertEqual((main.state, main.display_source), ('done', 'backup'), main.error_message)
+        bind = self._binds(mug)
+        self.assertEqual(bind.url, main.backup_url)
+        self.assertEqual(bind.source_id, source)
 
-    def test_09_alist_error_code_falls_back_to_binary(self):
-        source = self._alist_source()
-        self._run_import(media_source_id=source.id)
-        mug = self._tmpl('sci-test-mug')
-        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
-        put_resp = fake_response(json_data={'code': 403, 'message': 'permission denied'})
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
-                patch(ALIST_CLIENT) as get_file:
+    @mute_logger(QUEUE_MODULE)
+    def test_09b_untrusted_domain_without_backup_is_an_error(self):
+        self.env['ir.config_parameter'].sudo().set_param('media_picker.trusted_domains', 'other.example.org')
+        source = self._media_source()
+        batch = self._start_import()
+        batch.media_source_id = source
+        batch._run_products()
+        main = self.Queue.search([('product_tmpl_id', '=', self._tmpl('sci-test-mug').id), ('role', '=', 'main')])
+        with self._mock_get(), self._mock_upload(fail='boom'):
             main._process()
-        get_file.assert_not_called()
-        self.assertEqual(main.state, 'done')
-        self.assertTrue(mug.image_1920)
-        self.assertFalse(mug.use_external_media)
-        # 回退本地必须在记录上看得出来
-        self.assertEqual(main.storage, 'binary')
-        self.assertIn('403', main.cdn_error)
-
-    def test_09b_token_from_secret_ref_env_var(self):
-        """和 media_picker 一样：secret_ref 是环境变量名，token 从环境变量读。"""
-        source = self._alist_source()
-        source.write({'alist_token': False, 'secret_ref': 'SCI_TEST_ALIST_TOKEN'})
-        self._run_import(media_source_id=source.id)
-        mug = self._tmpl('sci-test-mug')
-        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
-        put_resp = fake_response(json_data={'code': 200})
-        with patch.dict(os.environ, {'SCI_TEST_ALIST_TOKEN': 'token-from-env'}), self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp) as put, \
-                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/a.jpg'}):
-            main._process()
-        self.assertEqual(put.call_args.kwargs['headers']['Authorization'], 'token-from-env')
-        self.assertEqual(main.storage, 'cdn')
-
-    def test_09c_missing_token_falls_back_with_reason(self):
-        """没 token 时不发请求（发了也只会 403），直接回退本地并写明原因。"""
-        source = self._alist_source()
-        source.write({'alist_token': False, 'secret_ref': 'SCI_TEST_UNSET_VAR'})
-        self._run_import(media_source_id=source.id)
-        mug = self._tmpl('sci-test-mug')
-        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
-        with patch.dict(os.environ, {}, clear=False), self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put') as put:
-            os.environ.pop('SCI_TEST_UNSET_VAR', None)
-            main._process()
-        put.assert_not_called()
-        self.assertEqual((main.state, main.storage), ('done', 'binary'))
-        self.assertIn('token', main.cdn_error)
-        self.assertTrue(mug.image_1920)
+        self.assertEqual(main.state, 'error')
+        self.assertIn('cdn.shopify.com', main.error_message)
 
     def test_10_variant_bind_does_not_overwrite_gallery_bind(self):
-        source = self._alist_source()
+        source = self._media_source()
         img = 'https://cdn.shopify.com/s/files/1/x/black.jpg'
         self._run_import(self._csv(
             f'vb-bag,Bag,,,,,TRUE,Color,Black,,,VB-B,,10,,{img},1,{img},,active',
@@ -223,18 +210,132 @@ class TestShopifyImageQueue(ShopifyImportCase):
         bag = self._tmpl('vb-bag')
         rows = self.Queue.search([('product_tmpl_id', '=', bag.id)], order='id')
         self.assertEqual(len(rows), 2)
-        put_resp = fake_response(json_data={'code': 200})
-        with self._mock_get(), \
-                patch(f'{QUEUE_MODULE}.requests.put', return_value=put_resp), \
-                patch(ALIST_CLIENT, return_value={'raw_url': 'https://media.example.com/d/black.jpg'}):
+        with self._mock_get(), self._mock_upload():
             for rec in rows:
                 rec._process()
-        binds = self.env['media.bind'].search([('product_tmpl_id', '=', bag.id)])
+        self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+        # 变体图和画廊图是同一张：只上传一次，两行共用同一份备份
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(len(set(rows.mapped('backup_url'))), 1)
+        self.assertEqual(set(rows.mapped('backup_state')), {'ok'})
+        binds = self._binds(bag)
         self.assertEqual(len(binds), 2)
-        gallery = binds.filtered(lambda b: not b.product_variant_id)
-        self.assertTrue(gallery.is_main)
-        self.assertEqual(binds.filtered('product_variant_id').product_variant_id,
-                         self._variant(bag, {'Color': 'Black'}))
+        self.assertTrue(binds.filtered(lambda b: not b.product_variant_id).is_main)
+        variant_bind = binds.filtered('product_variant_id')
+        self.assertEqual(variant_bind.product_variant_id, self._variant(bag, {'Color': 'Black'}))
+        self.assertFalse(variant_bind.is_main)
+
+    # ------------------------------------------------------------------
+    # Shopify 失效 → 对象存储顶上
+    # ------------------------------------------------------------------
+    def test_10b_failover_when_shopify_link_is_broken(self):
+        """media_picker 的链接健康检查把 Shopify 外链判成 broken：换成对象存储的备份。"""
+        source, mug, rows, _get = self._sync_mug()
+        binds = self._binds(mug)
+        binds.write({'health_status': 'broken', 'fail_count': 3})
+        self.assertEqual(self.Queue._cron_failover(), 2)
+        self.assertEqual(binds.mapped('url'), rows.mapped('backup_url'))
+        self.assertEqual(binds.source_id, source, '备份链接的域名由图片源担保')
+        self.assertEqual(set(binds.mapped('health_status')), {'unchecked'}, '换了链接要重新检查')
+        self.assertEqual(set(rows.mapped('display_source')), {'backup'})
+        self.assertEqual(set(rows.mapped('source_state')), {'gone'})
+        self.assertEqual(set(rows.mapped('verdict')), {'source_gone'})
+        self.assertEqual(self.Queue._cron_failover(), 0, '切过的不会再切')
+
+    def test_10c_failover_without_backup_is_flagged(self):
+        _source, mug, rows, _get = self._sync_mug(fail_upload='no token')
+        binds = self._binds(mug)
+        binds.write({'health_status': 'broken'})
+        self.assertEqual(self.Queue._cron_failover(), 0)
+        self.assertEqual(binds.mapped('url'), rows.mapped('source_url'), '没有备份可换')
+        self.assertEqual(set(rows.mapped('verdict')), {'lost'})
+
+    def test_10d_manual_switch_both_ways(self):
+        _source, mug, rows, _get = self._sync_mug()
+        main = rows[0]
+        main.action_switch_to_backup()
+        self.assertEqual((main.display_source, main.bind_id.url), ('backup', main.backup_url))
+        main.action_switch_to_shopify()
+        self.assertEqual((main.display_source, main.bind_id.url), ('shopify', main.source_url))
+        self.assertFalse(main.bind_id.source_id)
+
+    # ------------------------------------------------------------------
+    # 对账 / 中继
+    # ------------------------------------------------------------------
+    def _mock_probe(self, results):
+        """results: {url 片段: (HTTP 状态码, Content-Length) 或 异常}"""
+        def fake_head(url, **kw):
+            for fragment, result in results.items():
+                if fragment in url:
+                    if isinstance(result, Exception):
+                        raise result
+                    code, size = result
+                    resp = fake_response(status=200)
+                    resp.status_code = code
+                    resp.headers = {'Content-Length': str(size)} if size else {}
+                    return resp
+            raise AssertionError(f'unexpected probe {url}')
+        return patch(f'{QUEUE_MODULE}.requests.head', side_effect=fake_head)
+
+    def _verify(self, rows, results):
+        rows.action_verify()
+        self.assertEqual(set(rows.mapped('job')), {'verify'})
+        with self._mock_probe(results):
+            self.Queue._cron_process_pending(limit=30)
+
+    def test_10e_verify_consistent(self):
+        _source, _mug, rows, _get = self._sync_mug()
+        size = len(self.png)
+        self._verify(rows, {'cdn.shopify.com': (200, size), 'media.example.com': (200, size)})
+        self.assertEqual(set(rows.mapped('state')), {'done'}, rows.mapped('error_message'))
+        self.assertEqual(set(rows.mapped('verdict')), {'ok'})
+        self.assertTrue(all(rows.mapped('source_checked_at')) and all(rows.mapped('backup_checked_at')))
+
+    def test_10f_verify_detects_missing_and_mismatched_backup(self):
+        _source, mug, rows, _get = self._sync_mug()
+        size = len(self.png)
+        main, extra = rows
+        self._verify(rows, {
+            'cdn.shopify.com': (200, size),
+            f'{mug.id}_mug-1.jpg': (404, 0),          # 主图的备份文件没了
+            f'{mug.id}_mug-2.jpg': (200, size + 10),  # 附加图的备份大小不对
+        })
+        self.assertEqual((main.backup_state, main.verdict), ('missing', 'backup_missing'))
+        self.assertEqual((extra.backup_state, extra.verdict), ('mismatch', 'mismatch'))
+        self.assertEqual(set(rows.mapped('display_source')), {'shopify'}, '备份有问题时不切换显示')
+
+    def test_10g_verify_source_gone_fails_over(self):
+        """对账时 Shopify 明确返回 404：马上换成对象存储链接。"""
+        _source, _mug, rows, _get = self._sync_mug()
+        size = len(self.png)
+        self._verify(rows, {'cdn.shopify.com': (404, 0), 'media.example.com': (200, size)})
+        self.assertEqual(set(rows.mapped('source_state')), {'gone'})
+        self.assertEqual(set(rows.mapped('display_source')), {'backup'})
+        self.assertEqual(rows.bind_id.mapped('url'), rows.mapped('backup_url'))
+
+    def test_10h_network_error_is_not_treated_as_gone(self):
+        """超时 / 连接失败不能当成"失效"：结论不变，不切换。"""
+        _source, _mug, rows, _get = self._sync_mug()
+        self._verify(rows, {'cdn.shopify.com': OSError('proxy down'), 'media.example.com': (503, 0)})
+        self.assertEqual(set(rows.mapped('source_state')), {'ok'})
+        self.assertEqual(set(rows.mapped('backup_state')), {'ok'})
+        self.assertEqual(set(rows.mapped('display_source')), {'shopify'})
+
+    def test_10i_push_backup_relays_from_local_when_source_is_gone(self):
+        """中继：Shopify 源已经下不到了，主图改用本地那份上传；非主图没有本地副本，报错。"""
+        _source, mug, rows, _get = self._sync_mug(fail_upload='no token')
+        main, extra = rows
+        mug.image_1920 = base64.b64encode(self.png)  # 主图在本地有一份（media_picker 同步进来的）
+        rows.action_push_backup()
+        self.assertEqual(set(rows.mapped('job')), {'backup'})
+        with patch(f'{QUEUE_MODULE}.requests.get', return_value=fake_response(status=404)), \
+                self._mock_upload(), mute_logger(QUEUE_MODULE):
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual((main.state, main.backup_state, main.verdict), ('done', 'ok', 'ok'))
+        self.assertEqual([u['filename'] for u in self.uploads], [f'{mug.id}_mug-1.jpg'])
+        self.assertTrue(self.uploads[0]['bytes'])
+        self.assertEqual(extra.state, 'error')
+        self.assertIn('本地也没有', extra.error_message)
 
     # ------------------------------------------------------------------
     # 下载 / 批处理

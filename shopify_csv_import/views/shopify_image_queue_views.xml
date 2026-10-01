@@ -5,19 +5,41 @@
         <field name="name">shopify.image.queue.list</field>
         <field name="model">shopify.image.queue</field>
         <field name="arch" type="xml">
-            <list string="图片同步队列"
-                  decoration-danger="state == 'error'"
-                  decoration-success="state == 'done'"
+            <list string="图片台账" create="false"
+                  decoration-danger="state == 'error' or verdict == 'lost'"
+                  decoration-warning="verdict in ('no_backup', 'backup_missing', 'mismatch')"
                   decoration-muted="state == 'pending'">
+                <header>
+                    <!-- 中继 / 对账操作：勾选图片后可用，都在后台执行 -->
+                    <button name="action_push_backup" type="object" string="上传到对象存储"/>
+                    <button name="action_verify" type="object" string="对账"/>
+                    <button name="action_retry" type="object" string="重新拉取原图"/>
+                    <button name="action_switch_to_backup" type="object" string="显示改用对象存储"/>
+                    <button name="action_switch_to_shopify" type="object" string="显示改用 Shopify"/>
+                </header>
                 <field name="product_tmpl_id"/>
-                <field name="batch_id" optional="show"/>
+                <field name="batch_id" optional="hide"/>
                 <field name="role"/>
-                <field name="source_url"/>
-                <field name="media_source_id"/>
+                <field name="source_url" optional="hide"/>
+                <field name="source_state" widget="badge"
+                       decoration-success="source_state == 'ok'" decoration-danger="source_state == 'gone'"/>
+                <field name="backup_state" widget="badge"
+                       decoration-success="backup_state == 'ok'"
+                       decoration-danger="backup_state in ('failed', 'missing', 'mismatch')"/>
+                <field name="local_state" widget="badge" optional="show"
+                       decoration-success="local_state == 'ok'" decoration-danger="local_state == 'none'"/>
+                <field name="display_source" widget="badge"
+                       decoration-info="display_source == 'shopify'" decoration-success="display_source == 'backup'"/>
+                <field name="verdict" widget="badge"
+                       decoration-success="verdict == 'ok'"
+                       decoration-warning="verdict in ('no_backup', 'backup_missing', 'mismatch', 'source_gone')"
+                       decoration-danger="verdict == 'lost'"/>
+                <field name="job" optional="show"/>
                 <field name="state"/>
-                <field name="storage" optional="show"/>
-                <field name="error_message"/>
+                <field name="error_message" optional="show"/>
                 <field name="cdn_error" optional="show"/>
+                <field name="media_source_id" optional="hide"/>
+                <field name="storage" optional="hide"/>
             </list>
         </field>
     </record>
@@ -26,23 +48,80 @@
         <field name="name">shopify.image.queue.form</field>
         <field name="model">shopify.image.queue</field>
         <field name="arch" type="xml">
-            <form string="图片同步记录">
-                <group>
-                    <field name="product_tmpl_id"/>
-                    <field name="batch_id"/>
-                    <field name="product_variant_id"/>
-                    <field name="role"/>
-                    <field name="source_url"/>
-                    <field name="media_source_id"/>
-                    <field name="alist_target_path"/>
-                    <field name="state"/>
-                    <field name="storage"/>
-                    <field name="error_message"/>
-                    <field name="cdn_error"/>
-                </group>
-                <footer>
-                    <button name="action_retry" string="重试" type="object" class="btn-primary"/>
-                </footer>
+            <form string="图片台账" create="false">
+                <header>
+                    <button name="action_push_backup" type="object" string="上传到对象存储" class="btn-primary"
+                            invisible="not media_source_id or backup_state == 'ok'"/>
+                    <button name="action_push_backup" type="object" string="重新上传到对象存储"
+                            invisible="not media_source_id or backup_state != 'ok'"/>
+                    <button name="action_verify" type="object" string="对账" invisible="not media_source_id"/>
+                    <button name="action_retry" type="object" string="重新拉取原图"/>
+                    <button name="action_switch_to_backup" type="object" string="显示改用对象存储"
+                            invisible="display_source != 'shopify' or backup_state != 'ok'"/>
+                    <button name="action_switch_to_shopify" type="object" string="显示改用 Shopify"
+                            invisible="display_source != 'backup' or source_state == 'gone'"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="product_tmpl_id"/>
+                            <field name="product_variant_id" invisible="not product_variant_id"/>
+                            <field name="role"/>
+                            <field name="batch_id"/>
+                        </group>
+                        <group>
+                            <field name="verdict" widget="badge"
+                                   decoration-success="verdict == 'ok'"
+                                   decoration-warning="verdict in ('no_backup', 'backup_missing', 'mismatch', 'source_gone')"
+                                   decoration-danger="verdict == 'lost'"/>
+                            <field name="display_source"/>
+                            <field name="display_url" widget="url"/>
+                            <field name="bind_health" invisible="not bind_id"/>
+                            <field name="job"/>
+                            <field name="error_message" invisible="not error_message"/>
+                        </group>
+                    </group>
+                    <!-- 三方对照：Shopify 源 / 对象存储备份 / Odoo 本地 -->
+                    <group string="三方对照" col="3">
+                        <group string="① Shopify 源">
+                            <field name="source_state" widget="badge"
+                                   decoration-success="source_state == 'ok'" decoration-danger="source_state == 'gone'"/>
+                            <field name="source_url" widget="image_url" options="{'size': [220, 220]}" nolabel="1" colspan="2"
+                                   invisible="source_state == 'gone'"/>
+                            <field name="source_url" widget="url" string="链接"/>
+                            <field name="payload_size"/>
+                            <field name="width" string="尺寸（宽）"/>
+                            <field name="height" string="尺寸（高）"/>
+                            <field name="payload_sha256" string="SHA-256"/>
+                            <field name="source_checked_at"/>
+                        </group>
+                        <group string="② 对象存储备份">
+                            <field name="backup_state" widget="badge"
+                                   decoration-success="backup_state == 'ok'"
+                                   decoration-danger="backup_state in ('failed', 'missing', 'mismatch')"/>
+                            <field name="backup_url" widget="image_url" options="{'size': [220, 220]}" nolabel="1" colspan="2"
+                                   invisible="not backup_url"/>
+                            <field name="backup_url" widget="url" string="CDN 直链" invisible="not backup_url"/>
+                            <field name="media_source_id"/>
+                            <field name="alist_target_path"/>
+                            <field name="backup_size"/>
+                            <field name="backup_checked_at"/>
+                            <field name="cdn_error" invisible="not cdn_error"/>
+                        </group>
+                        <group string="③ Odoo 本地">
+                            <field name="local_state" widget="badge"
+                                   decoration-success="local_state == 'ok'" decoration-danger="local_state == 'none'"/>
+                            <field name="local_image" widget="image" options="{'size': [220, 220]}" nolabel="1" colspan="2"
+                                   invisible="local_state != 'ok' or role != 'main'"/>
+                            <div class="text-muted" colspan="2" invisible="local_state != 'na'">
+                                只有主图存本地（由 media_picker 从外链同步）；其余图片只存对象存储。
+                            </div>
+                            <field name="storage"/>
+                        </group>
+                    </group>
+                    <field name="bind_id" invisible="1"/>
+                </sheet>
             </form>
         </field>
     </record>
@@ -51,18 +130,29 @@
         <field name="name">shopify.image.queue.search</field>
         <field name="model">shopify.image.queue</field>
         <field name="arch" type="xml">
-            <search string="图片同步队列">
+            <search string="图片台账">
                 <field name="product_tmpl_id"/>
                 <field name="source_url"/>
+                <field name="batch_id"/>
                 <filter name="pending" string="待处理" domain="[('state', '=', 'pending')]"/>
-                <filter name="error" string="失败" domain="[('state', '=', 'error')]"/>
+                <filter name="error" string="任务失败" domain="[('state', '=', 'error')]"/>
                 <filter name="done" string="已完成" domain="[('state', '=', 'done')]"/>
                 <separator/>
-                <filter name="cdn_fallback" string="CDN 失败、已回退本地"
-                        domain="[('cdn_error', '!=', False)]"/>
+                <filter name="problem" string="有问题的"
+                        domain="[('verdict', 'in', ('no_backup', 'backup_missing', 'mismatch', 'lost'))]"/>
+                <filter name="cdn_fallback" string="缺备份" domain="[('verdict', '=', 'no_backup')]"/>
+                <filter name="backup_missing" string="备份丢失 / 不一致"
+                        domain="[('verdict', 'in', ('backup_missing', 'mismatch'))]"/>
+                <filter name="source_gone" string="Shopify 已失效" domain="[('source_state', '=', 'gone')]"/>
+                <filter name="lost" string="已失效且无备份" domain="[('verdict', '=', 'lost')]"/>
                 <separator/>
+                <filter name="show_shopify" string="显示 Shopify 链接" domain="[('display_source', '=', 'shopify')]"/>
+                <filter name="show_backup" string="显示对象存储链接" domain="[('display_source', '=', 'backup')]"/>
+                <filter name="main_only" string="主图" domain="[('role', '=', 'main')]"/>
                 <group>
-                    <filter name="group_state" string="按状态" context="{'group_by': 'state'}"/>
+                    <filter name="group_verdict" string="按对账结论" context="{'group_by': 'verdict'}"/>
+                    <filter name="group_display" string="按显示来源" context="{'group_by': 'display_source'}"/>
+                    <filter name="group_state" string="按任务状态" context="{'group_by': 'state'}"/>
                     <filter name="group_product" string="按商品" context="{'group_by': 'product_tmpl_id'}"/>
                     <filter name="group_batch" string="按批次" context="{'group_by': 'batch_id'}"/>
                 </group>
@@ -71,11 +161,15 @@
     </record>
 
     <record id="action_shopify_image_queue" model="ir.actions.act_window">
-        <field name="name">图片同步队列</field>
+        <field name="name">图片台账</field>
         <field name="res_model">shopify.image.queue</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_shopify_image_queue_search"/>
-        <field name="context">{'search_default_pending': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">还没有图片</p>
+            <p>导入 Shopify CSV 后，每张图片在这里有一行：Shopify 源、对象存储备份、本地图片各自的状态，
+               以及前台现在显示的是哪条链接。勾选后可以上传到对象存储、对账、切换显示来源。</p>
+        </field>
     </record>
 
 </odoo>

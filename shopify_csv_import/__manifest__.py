@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Shopify CSV 商品导入',
-    'version': '19.0.1.1.1',
+    'version': '19.0.2.0.0',
     'category': 'Sales/Sales',
     'summary': '将 Shopify 导出的商品 CSV 一键导入到 Odoo 网站商城',
     'description': """
@@ -16,12 +16,14 @@ website_sale（自建商城）：
 - 自动创建/复用变体属性（Option1/2/3），按属性组合把价格/成本/条码/SKU/重量
   写到对应的 product.product 变体上
 - 以 Shopify 的 Handle 作为唯一键，重复导入 = 更新，不会重复建商品（幂等）
-- 商品图片异步同步（ir.cron 队列）：默认直接存成 Odoo 标准二进制图片；
-  在导入向导里选一个 media_picker 已配置好的 Alist 图片源（product.media.source）
-  后，自动改为"下载后转存至 Alist/B2，写入 media.bind 外链画廊"，直接复用
-  media_picker 模块自带的 Shopify 导入接入点
-  （product.template.upsert_external_media_from_shopify），网站商品页
-  会自动走 CDN 直链显示
+- 商品图片后台同步，进度可视：默认存成 Odoo 本地图片；在导入时选一个 media_picker
+  已配置好、允许上传的图片源（media.source，Alist / S3）后，所有图片上传到对象存储做备份，
+  前台先用 Shopify 的 CDN 链接显示，Shopify 链接失效后自动换成对象存储的 CDN 直链；
+  主图由 media_picker 同步一份到本地，其余图片只走外链
+- 图片台账：每张图的 Shopify 源 / 对象存储备份 / 本地图片状态、对账、中继上传、
+  手动切换显示来源
+
+需要 media_picker 19.0.3.8 或更高版本。
 
 使用方法：
 
@@ -47,6 +49,7 @@ website_sale（自建商城）：
             'shopify_csv_import/static/src/batch_progress/*',
         ],
     },
+    'pre_init_hook': 'pre_init_check_media_picker',
     'installable': True,
     'application': False,
     'auto_install': False,

@@ -152,15 +152,29 @@ class TestShopifyImportWizard(ShopifyImportCase):
         self.assertEqual(variant_row.product_variant_id, self._variant(tee, {COLOR: 'Blue', SIZE: 'M'}))
         self.assertTrue(variant_row.source_url.endswith('tee-blue.jpg'))
 
-    def test_11_media_source_sets_alist_path(self):
-        source = self.env['product.media.source'].create({
-            'name': 'Test Alist', 'alist_url': 'https://alist.example.com',
-            'trusted_domains': 'media.example.com'})
+    def test_11_media_source_sets_backup_path(self):
+        source = self._media_source()
         self._run_import(media_source_id=source.id, alist_upload_path_prefix='/b2/test/')
         mug = self._tmpl('sci-test-mug')
         rows = self.Queue.search([('product_tmpl_id', '=', mug.id)], order='sequence')
         self.assertEqual(rows.media_source_id, source)
-        self.assertEqual(rows[0].alist_target_path, f'/b2/test/{mug.id}_mug-1.jpg')
+        # 相对图片源根目录的路径；根目录和 CDN 域名由 media_picker 的图片源决定
+        self.assertEqual(rows[0].alist_target_path, f'b2/test/{mug.id}_mug-1.jpg')
+
+    def test_11b_wizard_rejects_source_without_upload(self):
+        source = self._media_source(upload_enabled=False)
+        with self.assertRaisesRegex(UserError, '允许上传'):
+            self._start_import(media_source_id=source.id)
+
+    def test_11c_wizard_rejects_untrusted_shopify_domain(self):
+        self.env['ir.config_parameter'].sudo().set_param('media_picker.trusted_domains', 'other.example.org')
+        source = self._media_source()
+        with self.assertRaisesRegex(UserError, 'cdn.shopify.com'):
+            self._start_import(media_source_id=source.id)
+        # 名单里有 Shopify 的域名就放行
+        self.env['ir.config_parameter'].sudo().set_param(
+            'media_picker.trusted_domains', 'other.example.org\ncdn.shopify.com')
+        self.assertEqual(self._start_import(media_source_id=source.id).state, 'queued')
 
     @mute_logger('odoo.addons.shopify_csv_import.models.shopify_import_batch', 'odoo.sql_db')
     def test_12_one_bad_product_does_not_break_batch(self):

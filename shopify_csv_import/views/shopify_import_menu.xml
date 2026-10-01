@@ -20,7 +20,7 @@
               sequence="10"/>
 
     <menuitem id="menu_shopify_image_queue"
-              name="图片同步队列"
+              name="图片台账"
               parent="menu_shopify_import_root"
               action="shopify_csv_import.action_shopify_image_queue"
               sequence="20"/>

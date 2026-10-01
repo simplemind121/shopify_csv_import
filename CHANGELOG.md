@@ -2,6 +2,73 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.2.0.0] - 2026-10-01
+
+**Requires `media_picker` ≥ 19.0.3.8.** media_picker 3.8 removed
+`product.media.source` and `pem_alist_client`, which every earlier version of
+this module depended on (19.0.1.x cannot be installed next to media_picker
+3.8). This release is built on media_picker 3.8's own `media.source` upload
+API, link health checks and main-image sync instead. For media_picker 3.4.x
+stay on 19.0.1.1.1.
+
+### Changed — image storage and display
+
+- **Every image is backed up to object storage; only the main image is kept
+  locally.** With an object-storage source selected, each image is downloaded
+  from Shopify in original size and uploaded through
+  `media.source.upload_media()` (Alist or S3 — whatever the source is). The
+  module no longer has its own Alist client or token handling.
+- **Display uses the Shopify CDN first.** The `media.bind` row points at the
+  Shopify URL; the object-storage CDN URL is recorded as the backup.
+- **Automatic failover.** When media_picker's link health check marks a
+  Shopify URL `broken`, or a verification gets an explicit 404/410, the
+  displayed URL is switched to the object-storage backup (new cron
+  "Shopify 图片失效切换", every 10 minutes, plus a button on the batch).
+  Timeouts / connection errors / 5xx never count as "gone". Images with no
+  backup are flagged "Shopify 已失效且无备份". Switching back is manual.
+- The main image is flagged `is_main`; media_picker syncs it into the
+  product's `image_1920`. Non-main images are no longer stored locally, and a
+  failed upload no longer falls back to a local copy — the image keeps
+  displaying from Shopify and is flagged "缺备份" until re-uploaded.
+- Identical images within a product (a variant image that is also a gallery
+  image) are uploaded once and share the backup.
+
+### Added — image ledger (图片台账)
+
+- The image queue became a ledger: per image, the state of the **Shopify
+  source**, the **object-storage backup** and the **local copy**, which URL is
+  currently displayed, and a verdict (consistent / no backup / backup missing /
+  size mismatch / Shopify gone – backup took over / gone with no backup).
+  The form shows the three side by side with previews, sizes and check times.
+- Relay and reconciliation actions on selected rows, all as background jobs:
+  **上传到对象存储** (re-upload; from Shopify, or from the local copy when the
+  source is gone), **对账** (verify source and backup, compare backup size with
+  the downloaded original), **重新拉取原图**, **显示改用对象存储 / Shopify**.
+- Batch page: "补传缺备份的图片", "对账", "切换失效链接"; the live panel shows how
+  many images display from Shopify vs object storage and how many sources are
+  gone.
+- The wizard refuses to start when the selected source has uploads disabled,
+  or when media_picker's global trusted-domain list is set but lacks
+  `cdn.shopify.com` — both would otherwise fail on every image.
+- Install-time check for media_picker ≥ 3.8 with a clear message.
+
+### Migration
+
+- `media_source_id` on existing rows pointed at the old `product.media.source`;
+  the old column is kept as `legacy_media_source_id` and the new field starts
+  empty. Images already stored locally stay as they are and can be moved to
+  object storage from the batch page ("补传缺备份的图片" after choosing a source).
+
+### Verified
+
+- 66 tests, passing with the bundled test double **and with the real
+  media_picker 19.0.3.8.2**.
+- End to end with the real media_picker 3.8.2 and real Shopify downloads: main
+  image synced locally by media_picker, gallery = local main + Shopify links,
+  media_picker's health check returned 200 for all links, failover switched all
+  URLs. **The object-storage upload itself was mocked** — it has not yet been
+  run against a real Alist / S3.
+
 ## [19.0.1.1.1] - 2026-10-01
 
 ### Changed

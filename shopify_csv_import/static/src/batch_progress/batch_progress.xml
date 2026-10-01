@@ -30,23 +30,28 @@
             </div>
 
             <div class="mb-1 d-flex justify-content-between small">
-                <span>② 同步图片<t t-if="d.media_source_name">（上传到 Alist：<t t-esc="d.media_source_name"/>）</t><t t-else="">（存为 Odoo 本地图片）</t></span>
+                <span>② 同步图片<t t-if="d.media_source_name">（备份到对象存储：<t t-esc="d.media_source_name"/>，前台先用 Shopify 链接）</t><t t-else="">（存为 Odoo 本地图片）</t></span>
                 <span><t t-esc="d.img_done + d.img_error"/> / <t t-esc="d.img_total"/></span>
             </div>
             <div class="progress mb-2" style="height: 14px;">
                 <t t-set="tot" t-value="d.img_total || 1"/>
-                <div class="progress-bar bg-success" title="已上传 Alist" t-att-style="'width: ' + pct(100 * d.img_cdn / tot)"/>
-                <div class="progress-bar bg-info" title="本地存储" t-att-style="'width: ' + pct(100 * (d.img_binary - d.img_fallback) / tot)"/>
-                <div class="progress-bar bg-warning" title="CDN 失败、已回退本地" t-att-style="'width: ' + pct(100 * d.img_fallback / tot)"/>
+                <div class="progress-bar bg-success" title="已备份到对象存储" t-att-style="'width: ' + pct(100 * d.img_cdn / tot)"/>
+                <div class="progress-bar bg-info" title="本地图片" t-att-style="'width: ' + pct(100 * d.img_binary / tot)"/>
+                <div class="progress-bar bg-warning" title="缺备份（只有 Shopify 外链）" t-att-style="'width: ' + pct(100 * d.img_fallback / tot)"/>
                 <div class="progress-bar bg-danger" title="失败" t-att-style="'width: ' + pct(100 * d.img_error / tot)"/>
             </div>
             <div class="d-flex flex-wrap gap-3 small mb-2">
-                <span t-if="d.media_source_name"><span class="badge text-bg-success">&#160;</span> 已上传 Alist <b t-esc="d.img_cdn"/></span>
-                <span><span class="badge text-bg-info">&#160;</span> 本地存储 <b t-esc="d.img_binary - d.img_fallback"/></span>
-                <span t-if="d.img_fallback"><span class="badge text-bg-warning">&#160;</span> CDN 失败回退本地 <b t-esc="d.img_fallback"/></span>
+                <span t-if="d.media_source_name"><span class="badge text-bg-success">&#160;</span> 已备份到对象存储 <b t-esc="d.img_cdn"/></span>
+                <span t-if="d.img_binary"><span class="badge text-bg-info">&#160;</span> 本地图片 <b t-esc="d.img_binary"/></span>
+                <span t-if="d.img_fallback"><span class="badge text-bg-warning">&#160;</span> 缺备份 <b t-esc="d.img_fallback"/></span>
                 <span t-if="d.img_error"><span class="badge text-bg-danger">&#160;</span> 失败 <b t-esc="d.img_error"/></span>
                 <span><span class="badge text-bg-light border">&#160;</span> 待处理 <b t-esc="d.img_pending"/></span>
                 <span class="ms-auto" t-if="d.speed_text">速度 <b t-esc="d.speed_text"/><t t-if="d.eta_text"> · 预计剩余 <b t-esc="d.eta_text"/></t></span>
+            </div>
+            <div class="d-flex flex-wrap gap-3 small mb-2" t-if="d.media_source_name">
+                <span>前台显示：Shopify 链接 <b t-esc="d.img_display_shopify"/> 张 · 对象存储链接 <b t-esc="d.img_display_backup"/> 张</span>
+                <span t-if="d.img_source_gone" class="text-warning">Shopify 已失效 <b t-esc="d.img_source_gone"/> 张</span>
+                <span t-if="d.img_lost" class="text-danger">其中无备份 <b t-esc="d.img_lost"/> 张</span>
             </div>
             <div class="alert alert-danger py-1 px-2 mb-2 small" t-if="d.cron_warning">
                 <i class="fa fa-exclamation-circle me-1"/><t t-esc="d.cron_warning"/>
