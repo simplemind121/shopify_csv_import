@@ -31,7 +31,7 @@ Other options:
 ```bash
 sudo ./deploy_shopify_csv_import.sh --container my-odoo   # explicit container name
 sudo ./deploy_shopify_csv_import.sh --db mydb              # explicit database
-sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.2.0.1.zip
+sudo ./deploy_shopify_csv_import.sh --package /path/to/shopify_csv_import-19.0.2.0.2.zip
 sudo ./deploy_shopify_csv_import.sh --force                # allow same/older-version reinstall
 sudo ./deploy_shopify_csv_import.sh --no-backup            # skip pre-deploy backup (not recommended)
 sudo ./deploy_shopify_csv_import.sh --rollback              # restore the most recent backup
@@ -57,7 +57,7 @@ The script:
 
 ## Post-deploy checklist
 
-1. Apps → `shopify_csv_import` version = **19.0.2.0.1**
+1. Apps → `shopify_csv_import` version = **19.0.2.0.2**
 2. Top menu "Shopify 导入" opens the "导入记录" list, with the "导入 Shopify CSV" button (admin only)
 3. Import a small test CSV (a handful of products) without selecting an
    object-storage source first — confirm products/variants/categories/tags appear

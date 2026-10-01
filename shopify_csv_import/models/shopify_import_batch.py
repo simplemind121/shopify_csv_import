@@ -32,7 +32,9 @@ class ShopifyImportBatch(models.Model):
         'media.source', string='对象存储图片源', readonly=True,
         help='留空表示图片直接存成 Odoo 本地图片。')
     alist_upload_path_prefix = fields.Char(
-        string='上传文件夹', default='shopify-products', readonly=True)
+        string='上传文件夹', default='shopify-products',
+        help='图片源根目录下的文件夹。Alist 挂了多个存储时要带上存储的挂载路径，'
+             '例如 b2/shopify-products。改完点「应用到未备份的图片」。')
 
     state = fields.Selection([
         ('queued', '排队中'),
@@ -339,6 +341,20 @@ class ShopifyImportBatch(models.Model):
         self._reopen_for_images(f'{len(rows)} 张缺备份的图片重新排队上传对象存储')
         return self._notify(f'{len(rows)} 张图片已排队补传到对象存储。')
 
+    def action_apply_upload_folder(self):
+        """上传文件夹填错时（比如 Alist 里没有对应的存储）：在批次上改好文件夹后，
+        把还没备份成功的图片的目标路径都换成新文件夹。已经备份好的不动。"""
+        self.ensure_one()
+        folder = (self.alist_upload_path_prefix or '').strip('/')
+        if not folder:
+            return self._notify('请先填写上传文件夹。', kind='warning')
+        rows = self.queue_ids.filtered(lambda q: q.media_source_id and q.backup_state != 'ok')
+        for row in rows:
+            row.alist_target_path = (
+                f'{folder}/{row.product_tmpl_id.id}_{row._guess_filename(row.source_url)}')
+        self.alist_upload_path_prefix = folder
+        return self._notify(f'{len(rows)} 张未备份的图片已改为上传到 {folder}/。')
+
     def action_verify(self):
         """对账：逐张检查 Shopify 源和对象存储备份，在后台进行。"""
         rows = self.queue_ids.filtered(lambda q: q.state != 'pending' and q.media_source_id)
@@ -355,7 +371,8 @@ class ShopifyImportBatch(models.Model):
 
     def _reopen_for_images(self, message):
         for batch in self:
-            vals = {'status_message': message}
+            # 重新排队就意味着要继续跑：之前暂停过（手动或连续失败自动暂停）的批次一并恢复
+            vals = {'status_message': message, 'paused': False}
             if batch.state in ('done', 'done_errors'):
                 vals.update(state='syncing', finished_at=False,
                             images_started_at=fields.Datetime.now())

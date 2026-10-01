@@ -24,6 +24,10 @@ TIME_BUDGET_RATIO = 0.5
 DOWNLOAD_WORKERS = 8
 # 明确表示"文件不存在"的 HTTP 状态码。超时、5xx、403 等都不算（可能是临时故障）
 GONE_CODES = (404, 410)
+# 一个批次连续这么多张图上传对象存储失败、且一张都没成功过，就自动暂停这个批次：
+# 这种情况基本都是配置问题（token、上传文件夹、图片源被停用），继续跑只会把剩下
+# 的图全部下载一遍再标成"缺备份"
+AUTO_PAUSE_AFTER_FAILURES = 5
 
 try:
     import requests
@@ -214,10 +218,14 @@ class ShopifyImageQueue(models.Model):
             IrCron._commit_progress(remaining=self.search_count(domain))
 
         processed = 0
+        streak = {}  # 批次 id -> 本轮连续上传失败的张数
         for start in range(0, len(records), DOWNLOAD_WORKERS):
             if processed and time.monotonic() >= deadline:
                 break
-            chunk = records[start:start + DOWNLOAD_WORKERS]
+            chunk = records[start:start + DOWNLOAD_WORKERS].filtered(
+                lambda r: not r.batch_id.paused)
+            if not chunk:
+                continue
             # 进度说明：导入批次页面上会实时显示这一句
             verifying = all(r.job == 'verify' for r in chunk)
             chunk.batch_id._set_status(
@@ -227,15 +235,37 @@ class ShopifyImageQueue(models.Model):
                 IrCron._commit_progress(0)
             fetched = self._prefetch(chunk)
             for rec in chunk:
+                if rec.batch_id.paused:
+                    continue  # 这一组处理到一半时批次被自动暂停了：剩下的留着不动
                 if rec.media_source_id and rec.job != 'verify':
                     rec.batch_id._set_status(
                         f'正在上传对象存储：{self._guess_filename(rec.source_url)}')
                 rec._process(download=fetched.get(rec.id))
                 processed += 1
+                rec._track_upload_streak(streak)
                 if in_cron:
                     IrCron._commit_progress(1)
         records.batch_id._refresh_image_state()
         return processed
+
+    def _track_upload_streak(self, streak):
+        """记录所属批次连续上传失败的张数，达到阈值就自动暂停批次。"""
+        batch = self.batch_id
+        if not batch or not self.media_source_id or self.job == 'verify':
+            return
+        if self.backup_state == 'ok':
+            streak[batch.id] = 0
+            return
+        streak[batch.id] = streak.get(batch.id, 0) + 1
+        if streak[batch.id] >= AUTO_PAUSE_AFTER_FAILURES and not batch.paused:
+            reason = self.cdn_error or self.error_message or '未知原因'
+            batch.write({
+                'paused': True,
+                'status_message': f'已自动暂停：连续 {streak[batch.id]} 张图片上传对象存储失败（{reason}）。'
+                                  f'请检查图片源的 token / 上传文件夹，修好后点「继续」',
+            })
+            _logger.warning('批次 %s 连续 %s 张图片上传失败，已自动暂停: %s',
+                            batch.id, streak[batch.id], reason)
 
     @api.model
     def _pending_domain(self):
@@ -386,8 +416,12 @@ class ShopifyImageQueue(models.Model):
                             processed_at=fields.Datetime.now()))
         except Exception as e:
             _logger.exception('图片任务失败（%s）: %s', self.job, self.source_url)
-            self.write({'state': 'error', 'error_message': str(e)[:250],
-                        'processed_at': fields.Datetime.now()})
+            vals = {'state': 'error', 'error_message': str(e)[:250],
+                    'processed_at': fields.Datetime.now()}
+            if self.job == 'backup' and self.backup_state != 'ok':
+                # 补传失败：「备份失败原因」也换成这次的原因，不留着上一次的
+                vals.update(backup_state='failed', cdn_error=str(e)[:250])
+            self.write(vals)
 
     def _job_sync(self, content=None):
         """完整同步一张图。
@@ -444,8 +478,9 @@ class ShopifyImageQueue(models.Model):
         if state != 'unknown':  # 网络错误不改结论
             vals.update(source_state=state, source_checked_at=now)
         if result.get('backup'):
-            state, _code, size = result['backup']
-            if state == 'gone':
+            state, code, size = result['backup']
+            # 对象存储对"路径不对 / 文件不存在"经常回 403 而不是 404，所以备份这一侧 403 也算丢失
+            if state == 'gone' or code == 403:
                 vals.update(backup_state='missing', backup_checked_at=now)
             elif state == 'ok':
                 mismatch = bool(size and self.payload_size and size != self.payload_size)
@@ -512,6 +547,14 @@ class ShopifyImageQueue(models.Model):
             url = (result or {}).get('url')
             if not url:
                 raise ValueError('已上传，但对象存储暂时还解析不出直链（索引没刷新），稍后点「补传备份」重试')
+            # 传上去不算完：返回的直链要真的能打开、大小要对。否则等 Shopify 失效、
+            # 切到这条链接时才发现是坏的就晚了（实测遇到过：图片源的 CDN 路径设置
+            # 填错，文件在，但返回的直链少了目录，打开是 403）
+            problem = self._check_backup_link(url, len(content))
+            if problem:
+                raise ValueError(
+                    f'文件已上传到 {result.get("source_ref") or filename}，但返回的直链{problem}。'
+                    f'请检查图片源的 CDN 设置（CDN 地址 / 要去掉的路径前缀）：{url.split("?")[0]}')
             return {
                 'backup_state': 'ok', 'backup_url': url,
                 'backup_ref': result.get('source_ref') or False,
@@ -522,6 +565,19 @@ class ShopifyImageQueue(models.Model):
             _logger.warning('上传对象存储失败，先只用 Shopify 外链显示: %s (%s)', self.source_url, e)
             return {'backup_state': 'failed', 'cdn_error': str(e)[:250] or type(e).__name__,
                     'storage': 'link'}
+
+    @api.model
+    def _check_backup_link(self, url, expected_size):
+        """刚上传的备份直链是否可用。返回问题描述；没问题返回 False。
+        网络错误（探测不出结果）不算问题，留给以后的对账去发现。"""
+        state, code, size = self._probe(url)
+        if state == 'ok':
+            if size and expected_size and size != expected_size:
+                return f'大小不对（{size} 字节，原图 {expected_size} 字节）'
+            return False
+        if code:
+            return f'打不开（HTTP {code}）'
+        return False
 
     def _backup_folder_and_name(self):
         path = (self.alist_target_path or '').strip('/')

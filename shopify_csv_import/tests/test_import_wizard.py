@@ -176,6 +176,34 @@ class TestShopifyImportWizard(ShopifyImportCase):
             'media_picker.trusted_domains', 'other.example.org\ncdn.shopify.com')
         self.assertEqual(self._start_import(media_source_id=source.id).state, 'queued')
 
+    def test_11d_wizard_rejects_folder_outside_any_alist_storage(self):
+        """Alist 根目录下挂了多个存储时，上传文件夹必须落在某个存储下面。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        vals = {'source_type': 'alist'}
+        if 'base_url' in self.env['media.source']._fields:
+            vals['base_url'] = 'https://alist.example.com'
+        source = self._media_source(**vals)
+
+        class FakeAdapter:
+            def list(self, src, *, path='/', page=1, per_page=50, refresh=False):
+                if path == '/':
+                    return SimpleNamespace(items=[
+                        SimpleNamespace(name='115', is_dir=True), SimpleNamespace(name='b2', is_dir=True)])
+                if path == '/b2':
+                    return SimpleNamespace(items=[])
+                raise Exception('failed get storage: storage not found; rawPath: ' + path)
+
+        with patch.object(type(source), 'get_adapter', lambda self: FakeAdapter(), create=True):
+            # 默认文件夹 shopify-products 不在任何存储下面：提示里列出挂载点，并给出示例
+            with self.assertRaisesRegex(UserError, '115、b2.*115/shopify-products'):
+                self._start_import(media_source_id=source.id)
+            batch = self._start_import(media_source_id=source.id, alist_upload_path_prefix='b2/shopify-products')
+        self.assertEqual(batch.state, 'queued')
+        # 记住上次用的文件夹
+        self.assertEqual(self.Wizard.default_get(['alist_upload_path_prefix'])['alist_upload_path_prefix'],
+                         'b2/shopify-products')
+
     @mute_logger('odoo.addons.shopify_csv_import.models.shopify_import_batch', 'odoo.sql_db')
     def test_12_one_bad_product_does_not_break_batch(self):
         # 两个商品用同一个条码：Odoo 的条码唯一约束会让第二个失败，但第一个和第三个要照常导入

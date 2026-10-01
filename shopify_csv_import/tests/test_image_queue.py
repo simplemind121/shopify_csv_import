@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import base64
+import contextlib
 from unittest.mock import call, patch
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -171,6 +172,35 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertEqual(self._binds(mug).mapped('url'), rows.mapped('source_url'))
         self.assertFalse(mug.product_template_image_ids, '缺备份也不再回退存本地')
 
+    def test_08b_uploaded_but_link_unusable_counts_as_no_backup(self):
+        """文件传上去了，但图片源返回的直链打不开（CDN 设置填错）：不能记成"已备份"。"""
+        source = self._media_source()
+        self._run_import(media_source_id=source.id)
+        mug = self._tmpl('sci-test-mug')
+        main = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
+        with self._mock_get(), self._mock_upload(link_problem='打不开（HTTP 403）'):
+            main._process()
+        self.assertEqual((main.state, main.backup_state, main.verdict), ('done', 'failed', 'no_backup'))
+        self.assertIn('HTTP 403', main.cdn_error)
+        self.assertIn('CDN 设置', main.cdn_error)
+        self.assertFalse(main.backup_url)
+        self.assertEqual(main.display_source, 'shopify')
+
+    def test_08c_backup_link_check(self):
+        Queue = self.Queue
+        def probe(result):
+            return patch.object(type(Queue), '_probe', staticmethod(lambda url: result))
+        with probe(('ok', 200, 100)):
+            self.assertFalse(Queue._check_backup_link('https://x/a.jpg', 100))
+        with probe(('ok', 200, 90)):
+            self.assertIn('大小不对', Queue._check_backup_link('https://x/a.jpg', 100))
+        with probe(('unknown', 403, 0)):
+            self.assertIn('HTTP 403', Queue._check_backup_link('https://x/a.jpg', 100))
+        with probe(('gone', 404, 0)):
+            self.assertIn('HTTP 404', Queue._check_backup_link('https://x/a.jpg', 100))
+        with probe(('unknown', 0, 0)):  # 网络错误：不当成问题
+            self.assertFalse(Queue._check_backup_link('https://x/a.jpg', 100))
+
     def test_09_untrusted_shopify_domain_displays_backup(self):
         """media_picker 的可信域名名单不认 Shopify 时：有备份就直接显示备份。"""
         self.env['ir.config_parameter'].sudo().set_param('media_picker.trusted_domains', 'other.example.org')
@@ -275,7 +305,11 @@ class TestShopifyImageQueue(ShopifyImportCase):
                     resp.headers = {'Content-Length': str(size)} if size else {}
                     return resp
             raise AssertionError(f'unexpected probe {url}')
-        return patch(f'{QUEUE_MODULE}.requests.head', side_effect=fake_head)
+        # 探测先发 HEAD，遇到 403/405 会改用带 Range 的 GET 再试：两个都要模拟
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch(f'{QUEUE_MODULE}.requests.head', side_effect=fake_head))
+        stack.enter_context(patch(f'{QUEUE_MODULE}.requests.get', side_effect=fake_head))
+        return stack
 
     def _verify(self, rows, results):
         rows.action_verify()
@@ -312,6 +346,13 @@ class TestShopifyImageQueue(ShopifyImportCase):
         self.assertEqual(set(rows.mapped('source_state')), {'gone'})
         self.assertEqual(set(rows.mapped('display_source')), {'backup'})
         self.assertEqual(rows.bind_id.mapped('url'), rows.mapped('backup_url'))
+
+    def test_10g2_backup_403_counts_as_missing(self):
+        """对象存储对路径不对的文件回 403：对账要判成备份丢失，而不是"说不准"。"""
+        _source, _mug, rows, _get = self._sync_mug()
+        self._verify(rows, {'cdn.shopify.com': (200, len(self.png)), 'media.example.com': (403, 0)})
+        self.assertEqual(set(rows.mapped('backup_state')), {'missing'})
+        self.assertEqual(set(rows.mapped('verdict')), {'backup_missing'})
 
     def test_10h_network_error_is_not_treated_as_gone(self):
         """超时 / 连接失败不能当成"失效"：结论不变，不切换。"""

@@ -87,7 +87,13 @@
                             <field name="csv_file" filename="csv_filename"/>
                             <field name="csv_filename" invisible="1"/>
                             <field name="media_source_id"/>
-                            <field name="alist_upload_path_prefix" invisible="not media_source_id"/>
+                            <label for="alist_upload_path_prefix" invisible="not media_source_id"/>
+                            <div class="o_row" invisible="not media_source_id">
+                                <field name="alist_upload_path_prefix" class="oe_inline"/>
+                                <button name="action_apply_upload_folder" type="object" class="btn-link"
+                                        string="应用到未备份的图片" invisible="img_fallback == 0 and img_pending == 0"/>
+                            </div>
+                            <field name="img_pending" invisible="1"/>
                         </group>
                         <group string="时间">
                             <field name="started_at"/>

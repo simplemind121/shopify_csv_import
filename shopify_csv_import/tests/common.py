@@ -89,9 +89,14 @@ class ShopifyImportCase(TransactionCase):
             'trusted_domains': 'media.example.com',
         }, **vals))
 
-    def _mock_upload(self, fail=None):
-        """替换 media.source.upload_media：不发任何网络请求，记录收到的参数。"""
+    def _mock_upload(self, fail=None, link_problem=False):
+        """替换 media.source.upload_media：不发任何网络请求，记录收到的参数。
+        上传后的直链检查也一起替换掉（默认直链可用；link_problem 传问题描述）。"""
         self.uploads = []
+        link_check = patch.object(type(self.env['shopify.image.queue']), '_check_backup_link',
+                                  lambda self_, url, size: link_problem)
+        link_check.start()
+        self.addCleanup(link_check.stop)
 
         def fake_upload(source, folder, filename, stream, size=None, content_type=None, timeout=None):
             data = stream.read()

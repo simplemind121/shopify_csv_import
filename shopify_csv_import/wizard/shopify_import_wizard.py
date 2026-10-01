@@ -24,9 +24,15 @@ class ShopifyImportWizard(models.TransientModel):
              'Shopify 链接失效后自动换成对象存储的 CDN 直链；主图另外同步一份到 Odoo 本地。\n'
              '留空：所有图片直接存成 Odoo 本地图片，不走外链。')
     alist_upload_path_prefix = fields.Char(
-        string='上传文件夹', default='shopify-products',
+        string='上传文件夹', default=lambda self: self._default_upload_folder(),
         help='图片源根目录下的文件夹。图片会存成 "文件夹/商品ID_文件名"，'
-             '例如 shopify-products/123_foo.jpg。')
+             '例如 shopify-products/123_foo.jpg。\n'
+             'Alist 挂了多个存储时要带上存储的挂载路径，例如 b2/shopify-products。')
+
+    def _default_upload_folder(self):
+        # 记住上次导入用的文件夹，不用每次重填
+        return self.env['ir.config_parameter'].sudo().get_param(
+            'shopify_csv_import.upload_folder', 'shopify-products')
 
     def action_import(self):
         self.ensure_one()
@@ -49,6 +55,9 @@ class ShopifyImportWizard(models.TransientModel):
             'total_products': len(groups),
             'status_message': f'已排队：{len(groups)} 个商品，后台任务马上开始处理',
         })
+        if self.media_source_id and self.alist_upload_path_prefix:
+            self.env['ir.config_parameter'].sudo().set_param(
+                'shopify_csv_import.upload_folder', self.alist_upload_path_prefix.strip('/'))
         batch._trigger_batch_run()
         return {
             'type': 'ir.actions.act_window',
@@ -78,3 +87,33 @@ class ShopifyImportWizard(models.TransientModel):
             raise UserError(
                 'media_picker 的可信域名名单（系统参数 media_picker.trusted_domains）里没有 '
                 f'{", ".join(missing)}，Shopify 的图片链接会被拒绝。请先把它加进名单。')
+        self._check_upload_folder()
+
+    def _check_upload_folder(self):
+        """Alist 根目录下挂了多个存储时，根目录本身不能写文件：上传文件夹必须落在某个
+        存储的挂载路径下面。这里用 media_picker 的只读接口先探一下，填错了马上提示，
+        而不是等每张图都上传失败。探测本身出别的错（网络等）不拦导入。"""
+        source = self.media_source_id
+        folder = (self.alist_upload_path_prefix or '').strip('/')
+        if getattr(source, 'source_type', None) != 'alist' or not hasattr(source, 'get_adapter'):
+            return
+        top = folder.split('/')[0] if folder else ''
+        try:
+            adapter = source.get_adapter()
+            adapter.list(source, path='/' + top, page=1, per_page=1)
+        except Exception as e:
+            if 'storage not found' not in str(e).lower():
+                return
+            mounts = []
+            try:
+                root = adapter.list(source, path='/', page=1, per_page=50)
+                mounts = [i.name for i in (getattr(root, 'items', None) or [])
+                          if getattr(i, 'is_dir', False)]
+            except Exception:
+                pass
+            hint = f'这个图片源根目录下有：{"、".join(mounts)}。' if mounts else ''
+            example = f'{mounts[0]}/{folder or "shopify-products"}' if mounts else 'b2/shopify-products'
+            raise UserError(
+                f'上传文件夹「{folder or "/"}」在图片源「{source.display_name}」里没有对应的存储'
+                f'（Alist 返回 storage not found），图片会全部上传失败。{hint}'
+                f'请把上传文件夹改成带存储挂载路径的形式，例如 {example}。') from e

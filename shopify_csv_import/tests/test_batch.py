@@ -247,3 +247,61 @@ class TestShopifyImportBatch(ShopifyImportCase):
                     called.append(f'{model}.{name}')
         self.assertIn('shopify.import.batch.action_open_import_wizard', called)
         self.assertGreaterEqual(len(called), 12)
+
+    # ------------------------------------------------------------------
+    # 19.0.2.0.2：配置有问题时的保护
+    # ------------------------------------------------------------------
+    def test_17_auto_pause_after_consecutive_upload_failures(self):
+        """图片源配置有问题（token、文件夹）时，不能把整批图都跑成"缺备份"：
+        连续失败几张就自动暂停，剩下的留着，原因显示在进度上。"""
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        with self._mock_get(), self._mock_upload(fail='storage not found'), \
+                patch(f'{QUEUE_MODULE}.AUTO_PAUSE_AFTER_FAILURES', 2):
+            processed = self.Queue._cron_process_pending(limit=30)
+        self.assertEqual(processed, 2, '第 2 张失败后就该停')
+        self.assertTrue(batch.paused)
+        self.assertIn('已自动暂停', batch.status_message)
+        self.assertIn('storage not found', batch.status_message)
+        self.assertEqual((batch.img_pending, batch.img_fallback), (3, 2))
+        self.assertEqual(len(self.uploads), 2, '暂停后不再下载 / 上传')
+        # 暂停期间定时任务不碰它
+        with self._mock_get(), self._mock_upload():
+            self.assertEqual(self.Queue._cron_process_pending(limit=30), 0)
+        # 修好后点「补传缺备份的图片」：自动恢复，全部补齐
+        batch.action_retry_cdn_fallback()
+        self.assertFalse(batch.paused)
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        self.assertEqual((batch.state, batch.img_cdn, batch.img_fallback), ('done', 5, 0))
+
+    def test_18_apply_new_upload_folder_to_unbacked_images(self):
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        mug = self._tmpl('sci-test-mug')
+        row = self.Queue.search([('product_tmpl_id', '=', mug.id), ('role', '=', 'main')])
+        self.assertEqual(row.alist_target_path, f'shopify-products/{mug.id}_mug-1.jpg')
+        batch.alist_upload_path_prefix = '/b2/shopify-products/'
+        batch.action_apply_upload_folder()
+        self.assertEqual(batch.alist_upload_path_prefix, 'b2/shopify-products')
+        self.assertEqual(row.alist_target_path, f'b2/shopify-products/{mug.id}_mug-1.jpg')
+        with self._mock_get(), self._mock_upload():
+            row._process()
+        self.assertEqual(self.uploads[0]['folder'], 'b2/shopify-products')
+        # 已经备份好的不再改路径
+        batch.alist_upload_path_prefix = 'other'
+        batch.action_apply_upload_folder()
+        self.assertEqual(row.alist_target_path, f'b2/shopify-products/{mug.id}_mug-1.jpg')
+
+    def test_19_failed_backup_job_updates_reason(self):
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        row = batch.queue_ids[:1]
+        with self._mock_get(), self._mock_upload(fail='permission denied'):
+            row._process()
+        self.assertIn('permission denied', row.cdn_error)
+        row.action_push_backup()
+        with self._mock_get(), self._mock_upload(fail='storage not found'), mute_logger(QUEUE_MODULE):
+            row._process()
+        self.assertEqual(row.state, 'error')
+        self.assertIn('storage not found', row.cdn_error, '要显示最新一次的失败原因')

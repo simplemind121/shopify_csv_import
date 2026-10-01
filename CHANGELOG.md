@@ -2,6 +2,49 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.2.0.2] - 2026-10-01
+
+First run against a **real Alist** (media_picker 3.8.2, B2-backed storage).
+The upload path itself works; three configuration problems on the way exposed
+gaps in how the module reacts to a misconfigured source.
+
+### Added
+
+- **Auto-pause on systematic upload failure.** After 5 consecutive images of a
+  batch fail to upload (and none has succeeded), the batch pauses itself and
+  shows the reason on the progress panel, instead of downloading every
+  remaining image only to flag it "no backup". Re-queueing ("补传缺备份的图片",
+  retry, verify) resumes a paused batch.
+- **Upload-folder pre-check for Alist sources.** When Alist's root only holds
+  mounted storages, the folder must sit under one of them; the wizard now asks
+  Alist first and, on `storage not found`, refuses to start and lists the
+  available mount points. The wizard also remembers the last folder used.
+- **The upload folder can be corrected on a batch** ("应用到未备份的图片"), instead
+  of having to re-import.
+- **The backup link is checked right after upload.** A file can be stored fine
+  while the URL the source returns is unusable (seen with a wrong "CDN strip
+  path prefix": the returned URL lost its directory and answered 403). Such
+  an image is now recorded as "no backup" with that explanation, not as backed
+  up — otherwise it would only surface when Shopify dies and the display fails
+  over to a dead link.
+
+### Fixed
+
+- Verification treats **403 on the backup URL as "backup missing"** (object
+  storage answers 403 for wrong paths), instead of "can't tell".
+- A failed re-upload now replaces the stored "backup failure reason" instead of
+  leaving the previous one.
+- When a batch auto-paused mid-chunk, the next image overwrote the pause reason
+  in the status line.
+
+### Notes for media_picker 3.8 sources
+
+- The token must be in a **server environment variable**; the source's
+  `Secret Reference` holds the variable's *name*. With the token text in that
+  field, browsing still works (guest read) but uploads get `permission denied`.
+- `CDN strip path prefix` is what is *removed* from Alist's path when building
+  the CDN URL (normally `/d`), not the upload folder.
+
 ## [19.0.2.0.1] - 2026-10-01
 
 ### Fixed
