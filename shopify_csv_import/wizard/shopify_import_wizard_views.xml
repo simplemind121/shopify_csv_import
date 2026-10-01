@@ -14,7 +14,7 @@
                 </group>
                 <div class="text-muted">
                     点「开始导入」后会建一个导入批次，商品和图片都在后台处理。
-                    可以直接关掉页面，随时在「Shopify 导入 → 导入批次」查看进度。
+                    可以直接关掉页面，随时在「Shopify 导入 → 导入记录」查看进度。
                 </div>
                 <footer>
                     <button name="action_import" string="开始导入" type="object" class="btn-primary"/>

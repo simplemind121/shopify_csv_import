@@ -9,6 +9,10 @@
                   decoration-info="state in ('queued', 'importing', 'syncing')"
                   decoration-success="state == 'done'"
                   decoration-warning="state == 'done_errors'">
+                <header>
+                    <button name="action_open_import_wizard" type="object" string="导入 Shopify CSV"
+                            class="btn-primary" display="always"/>
+                </header>
                 <field name="name"/>
                 <field name="create_date" string="创建时间"/>
                 <field name="state" widget="badge"
@@ -120,14 +124,15 @@
     </record>
 
     <record id="action_shopify_import_batch" model="ir.actions.act_window">
-        <field name="name">导入批次</field>
+        <field name="name">导入记录</field>
         <field name="res_model">shopify.import.batch</field>
         <field name="view_mode">list,form</field>
         <field name="search_view_id" ref="view_shopify_import_batch_search"/>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">还没有导入过 Shopify 商品</p>
-            <p>在「Shopify 导入 → 导入商品 CSV」上传文件后，每次导入都会在这里生成一个批次，
-               可以随时查看商品导入和图片同步（上传 Alist）的进度。</p>
+            <p>点左上角「导入 Shopify CSV」上传 Shopify 后台导出的商品 CSV。
+               每次导入都会在这里留一条记录，商品导入和图片同步（上传 Alist）都在后台进行，
+               关掉页面也不影响，随时回来这里查看进度。</p>
         </field>
     </record>
 

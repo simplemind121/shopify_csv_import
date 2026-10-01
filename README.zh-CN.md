@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| **最新版本** | [`19.0.1.1.0`](./CHANGELOG.md#19110---2026-10-01) |
+| **最新版本** | [`19.0.1.1.1`](./CHANGELOG.md#19111---2026-10-01) |
 | **模块技术名** | `shopify_csv_import` |
 | **Odoo** | 19 社区版 |
 | **依赖** | `website_sale`、`product`、`media_picker` |
@@ -59,7 +59,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 
 ---
 
-## 功能矩阵（当前版本 19.0.1.1.0）
+## 功能矩阵（当前版本 19.0.1.1.1）
 
 | 功能 | 状态 |
 |---|---|
@@ -82,7 +82,7 @@ Shopify 后台导出的商品 CSV 是一个 60 多列、一个商品对应多行
 
 ```bash
 # 1) clone 这个仓库，或者从 Release 里下载：
-#    shopify_csv_import-19.0.1.1.0.zip
+#    shopify_csv_import-19.0.1.1.1.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) 两个文件放同一目录，在 VPS 上执行
@@ -90,7 +90,8 @@ chmod +x deploy_shopify_csv_import.sh
 sudo ./deploy_shopify_csv_import.sh --target staging   # 先在 staging 测
 sudo ./deploy_shopify_csv_import.sh                     # 确认没问题再上生产
 
-# 3) Odoo 后台 → 顶部菜单「Shopify 导入」→「导入商品 CSV」→ 上传你的导出文件
+# 3) Odoo 后台 → 顶部菜单「Shopify 导入」→ 按钮「导入 Shopify CSV」→ 上传你的导出文件
+#    之后会进入这次导入的进度页面；关掉也没关系，再点「Shopify 导入」就能看到所有导入记录
 ```
 
 完整流程、参数说明、回滚：**[docs/DEPLOY.md](./docs/DEPLOY.md)**。

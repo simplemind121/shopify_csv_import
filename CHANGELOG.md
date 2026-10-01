@@ -2,6 +2,17 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.1.1.1] - 2026-10-01
+
+### Changed
+
+- **"Shopify 导入" now opens the import list first** ("导入记录"), not the
+  upload dialog. Previously you had to pick a file before you could get
+  anywhere, and checking on a running import meant hunting for a second
+  menu. New imports start from the "导入 Shopify CSV" button on the list
+  (also still available as the "新建导入" menu); the empty list explains how
+  to start.
+
 ## [19.0.1.1.0] - 2026-10-01
 
 ### Added

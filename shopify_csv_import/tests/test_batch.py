@@ -176,3 +176,13 @@ class TestShopifyImportBatch(ShopifyImportCase):
         queued = self._start_import()
         self.env.ref('shopify_csv_import.ir_cron_shopify_import_batch').active = False
         self.assertIn('商品导入', queued.get_progress_snapshot(queued.id)['cron_warning'])
+
+    def test_14_menu_opens_import_list_first(self):
+        """进「Shopify 导入」先看到导入记录，不是必须先上传文件的弹窗。"""
+        root = self.env.ref('shopify_csv_import.menu_shopify_import_root')
+        first = root.child_id.sorted('sequence')[:1]
+        self.assertEqual(first.action, self.env.ref('shopify_csv_import.action_shopify_import_batch'))
+
+    def test_15_list_button_opens_upload_dialog(self):
+        action = self.env['shopify.import.batch'].action_open_import_wizard()
+        self.assertEqual((action['res_model'], action['target']), ('shopify.import.wizard', 'new'))

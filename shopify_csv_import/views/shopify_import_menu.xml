@@ -1,22 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
 
+    <!-- 进入「Shopify 导入」默认先看到导入记录（进度）；新建导入用列表上的按钮 -->
     <menuitem id="menu_shopify_import_root"
               name="Shopify 导入"
               sequence="95"
               groups="base.group_system"/>
 
+    <menuitem id="menu_shopify_import_batch"
+              name="导入记录"
+              parent="menu_shopify_import_root"
+              action="shopify_csv_import.action_shopify_import_batch"
+              sequence="5"/>
+
     <menuitem id="menu_shopify_import_wizard"
-              name="导入商品 CSV"
+              name="新建导入"
               parent="menu_shopify_import_root"
               action="shopify_csv_import.action_shopify_import_wizard"
               sequence="10"/>
-
-    <menuitem id="menu_shopify_import_batch"
-              name="导入批次（进度）"
-              parent="menu_shopify_import_root"
-              action="shopify_csv_import.action_shopify_import_batch"
-              sequence="15"/>
 
     <menuitem id="menu_shopify_image_queue"
               name="图片同步队列"

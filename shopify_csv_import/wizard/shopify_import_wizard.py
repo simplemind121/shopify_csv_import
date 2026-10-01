@@ -47,7 +47,7 @@ class ShopifyImportWizard(models.TransientModel):
         batch._trigger_batch_run()
         return {
             'type': 'ir.actions.act_window',
-            'name': '导入批次',
+            'name': '导入记录',
             'res_model': 'shopify.import.batch',
             'res_id': batch.id,
             'view_mode': 'form',

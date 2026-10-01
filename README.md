@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.1.1.0`](./CHANGELOG.md#19110---2026-10-01) |
+| **Latest version** | [`19.0.1.1.1`](./CHANGELOG.md#19111---2026-10-01) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -65,7 +65,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ---
 
-## Feature matrix (current: 19.0.1.1.0)
+## Feature matrix (current: 19.0.1.1.1)
 
 | Area | Status |
 |---|---|
@@ -88,7 +88,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.1.1.0.zip
+#    shopify_csv_import-19.0.1.1.1.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS
@@ -96,9 +96,9 @@ chmod +x deploy_shopify_csv_import.sh
 sudo ./deploy_shopify_csv_import.sh --target staging   # test first
 sudo ./deploy_shopify_csv_import.sh                     # then production
 
-# 3) Odoo → top menu "Shopify 导入" → "导入商品 CSV" → upload your export
+# 3) Odoo → "Shopify 导入" → button "导入 Shopify CSV" → upload your export
 #    You land on the batch page; progress keeps running if you close it.
-#    Come back any time: "Shopify 导入" → "导入批次（进度）"
+#    Come back any time: "Shopify 导入" opens the import list (导入记录)
 ```
 
 Full procedure, options, and rollback: **[docs/DEPLOY.md](./docs/DEPLOY.md)**.
