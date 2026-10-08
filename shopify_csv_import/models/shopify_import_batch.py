@@ -380,6 +380,30 @@ class ShopifyImportBatch(models.Model):
         self._reopen_for_images(f'{len(rows)} 张图片排队对账')
         return self._notify(f'{len(rows)} 张图片已排队对账，结果看「图片台账」的「对账结论」。')
 
+    def action_display_backup(self):
+        """一键切换：这个批次里所有有备份的图片，前台都改用对象存储的 CDN 直链显示。"""
+        self.ensure_one()
+        rows = self.queue_ids.filtered(lambda q: q.media_source_id and q.display_source != 'backup')
+        ready = rows.filtered(lambda q: q.backup_state == 'ok' and q.backup_url)
+        ready.action_switch_to_backup()
+        skipped = len(rows) - len(ready)
+        return self._notify(
+            f'{len(ready)} 张图片已改用对象存储显示。'
+            + (f'另有 {skipped} 张没有可用的备份，仍显示 Shopify 链接（先点「补传缺备份的图片」）。' if skipped else ''),
+            kind='warning' if skipped else 'success')
+
+    def action_display_shopify(self):
+        """一键切换：这个批次里所有图片，前台都改回 Shopify 的 CDN 链接显示。"""
+        self.ensure_one()
+        rows = self.queue_ids.filtered(lambda q: q.media_source_id and q.display_source == 'backup')
+        ready = rows.filtered(lambda q: q.source_state != 'gone')
+        ready.action_switch_to_shopify()
+        skipped = len(rows) - len(ready)
+        return self._notify(
+            f'{len(ready)} 张图片已改回 Shopify 链接显示。'
+            + (f'另有 {skipped} 张的 Shopify 链接已失效，继续显示对象存储链接。' if skipped else ''),
+            kind='warning' if skipped else 'success')
+
     def action_failover(self):
         """把 Shopify 链接已经失效的图片，立刻换成对象存储的备份链接。"""
         switched = self.env['shopify.image.queue']._cron_failover()

@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Latest version** | [`19.0.2.0.5`](./CHANGELOG.md#19205---2026-10-02) |
+| **Latest version** | [`19.0.2.0.6`](./CHANGELOG.md#19206---2026-10-08) |
 | **Module name** | `shopify_csv_import` |
 | **Odoo** | 19 Community |
 | **Depends on** | `website_sale`, `product`, `media_picker` |
@@ -65,7 +65,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ---
 
-## Feature matrix (current: 19.0.2.0.5)
+## Feature matrix (current: 19.0.2.0.6)
 
 | Area | Status |
 |---|---|
@@ -83,7 +83,7 @@ images, but works standalone with plain Odoo binary images too.
 | Image ledger: per-image source / backup / local status, verification, relay (re-upload), manual display switch | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
 | Chunked commits for very large catalogs | Supported (resumable, time-budgeted slices) |
-| Automated tests on a real Odoo 19 DB | Yes — 80 tests (stub and real `media_picker` 3.8.2) + verified on a real 284-product Shopify export |
+| Automated tests on a real Odoo 19 DB | Yes — 81 tests (stub and real `media_picker` 3.8.2) + verified on a real 284-product Shopify export |
 
 ---
 
@@ -91,7 +91,7 @@ images, but works standalone with plain Odoo binary images too.
 
 ```bash
 # 1) Clone this repo, or download the Release assets:
-#    shopify_csv_import-19.0.2.0.5.zip
+#    shopify_csv_import-19.0.2.0.6.zip
 #    deploy_shopify_csv_import.sh
 
 # 2) Same directory on the VPS

@@ -52,6 +52,12 @@
                             confirm="确认图片源已经配置好并开启了上传？缺备份的图片会重新上传到对象存储。"/>
                     <button name="action_verify" string="对账" type="object"
                             invisible="not media_source_id or state in ('queued', 'importing')"/>
+                    <button name="action_display_backup" string="全部显示对象存储" type="object"
+                            invisible="img_display_shopify == 0 or img_cdn == 0"
+                            confirm="把这个批次里所有已备份的图片改用对象存储的链接显示？之后访客看图走的是你自己的对象存储流量。可以随时再切回 Shopify。"/>
+                    <button name="action_display_shopify" string="全部显示 Shopify" type="object"
+                            invisible="img_display_backup == 0"
+                            confirm="把这个批次里的图片改回 Shopify 的链接显示？Shopify 链接已失效的图片不会切回。"/>
                     <button name="action_failover" string="切换失效链接" type="object"
                             invisible="img_source_gone == 0 and img_display_shopify == 0"
                             help="把 Shopify 链接已经失效的图片，立刻换成对象存储的备份链接"/>
@@ -80,6 +86,8 @@
                     </div>
                     <field name="img_source_gone" invisible="1"/>
                     <field name="img_display_shopify" invisible="1"/>
+                    <field name="img_display_backup" invisible="1"/>
+                    <field name="img_cdn" invisible="1"/>
                     <!-- 实时进度面板：每 3 秒自动刷新，不用手动刷新页面 -->
                     <widget name="shopify_batch_progress"/>
                     <group>

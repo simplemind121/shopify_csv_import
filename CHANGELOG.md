@@ -2,6 +2,16 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [19.0.2.0.6] - 2026-10-08
+
+### Added
+
+- **One-click display switch on the batch page**: "全部显示对象存储" switches
+  every backed-up image of the batch to the object-storage CDN URL, and
+  "全部显示 Shopify" switches them back — no need to select rows in the image
+  ledger. Images without a usable backup (or whose Shopify link is dead, for
+  the way back) are skipped and counted in the notification.
+
 ## [19.0.2.0.5] - 2026-10-02
 
 Covers 19.0.2.0.3 – 19.0.2.0.5, all found while running a real 284-product /

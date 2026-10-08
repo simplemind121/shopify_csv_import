@@ -358,3 +358,28 @@ class TestShopifyImportBatch(ShopifyImportCase):
         for action in ('action_verify', 'action_retry_cdn_fallback', 'action_retry_errors'):
             getattr(batch, action)()
             self.assertEqual(batch.state, 'done', action)
+
+    def test_23_one_click_display_switch(self):
+        """批次页面上一键把所有图片切到对象存储 / 切回 Shopify；没有备份、源已失效的跳过并说明。"""
+        source = self._media_source()
+        batch = self._run_import(media_source_id=source.id)
+        with self._mock_get(), self._mock_upload():
+            self.Queue._cron_process_pending(limit=30)
+        no_backup = batch.queue_ids[0]
+        no_backup.write({'backup_state': 'failed', 'backup_url': False})
+        action = batch.action_display_backup()
+        self.assertIn('4 张图片已改用对象存储', action['params']['message'])
+        self.assertIn('1 张没有可用的备份', action['params']['message'])
+        batch.invalidate_recordset()
+        self.assertEqual((batch.img_display_backup, batch.img_display_shopify), (4, 1))
+        switched = batch.queue_ids - no_backup
+        self.assertEqual(switched.bind_id.mapped('url'), switched.mapped('backup_url'))
+
+        gone = switched[0]
+        gone.source_state = 'gone'
+        action = batch.action_display_shopify()
+        self.assertIn('3 张图片已改回 Shopify', action['params']['message'])
+        self.assertIn('1 张的 Shopify 链接已失效', action['params']['message'])
+        batch.invalidate_recordset()
+        self.assertEqual((batch.img_display_backup, batch.img_display_shopify), (1, 4))
+        self.assertEqual(gone.bind_id.url, gone.backup_url)
