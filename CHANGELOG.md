@@ -2,6 +2,15 @@
 
 All notable changes to `shopify_csv_import` are documented here.
 
+## [Unreleased]
+
+### Documentation
+
+- media_picker 19.0.3.9 lets the token be entered directly in the Media Source
+  form (stored write-only, takes priority over the environment variable). The
+  module README now describes both ways. Verified: all 81 tests pass against
+  media_picker 19.0.3.9.0. No code change.
+
 ## [19.0.2.0.6] - 2026-10-08
 
 ### Added

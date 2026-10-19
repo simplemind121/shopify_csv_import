@@ -92,8 +92,11 @@ website_sale 自建商城。
 
 **图片源（media_picker 3.8）怎么配**：
 
-- token 放在服务器的**环境变量**里，图片源的 Secret Reference 填**变量名**（不是 token 本身）。
-  填成 token 本身时，选图浏览照常能用，但上传会被拒绝（permission denied）
+- token 怎么填看 media_picker 的版本：
+  - **19.0.3.9 及以上**：直接填在图片源表单的「Token / Access Key」里即可（只写不回显，优先于环境变量）
+  - **19.0.3.8.x**：token 只能放在服务器的**环境变量**里，图片源的 Secret Reference 填**变量名**
+    （不是 token 本身）。填成 token 本身时，选图浏览照常能用，但上传会被拒绝（permission denied）
+  - 两个版本都支持环境变量方式；已经按环境变量配好的不用改
 - 「CDN strip path prefix」是生成 CDN 链接时要从路径里**去掉**的那一段（一般是 `/d`），
   不是上传文件夹
 - Alist 根目录下挂了多个存储时，上传文件夹要带上存储的挂载路径，例如 `b2/shopify-products`

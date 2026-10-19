@@ -83,7 +83,7 @@ images, but works standalone with plain Odoo binary images too.
 | Image ledger: per-image source / backup / local status, verification, relay (re-upload), manual display switch | Supported |
 | Compare-at-price / gift cards / SEO metafields | Not mapped (not needed for the initial use case) |
 | Chunked commits for very large catalogs | Supported (resumable, time-budgeted slices) |
-| Automated tests on a real Odoo 19 DB | Yes — 81 tests (stub and real `media_picker` 3.8.2) + verified on a real 284-product Shopify export |
+| Automated tests on a real Odoo 19 DB | Yes — 81 tests (stub, and real `media_picker` 3.8.2 and 3.9.0) + verified on a real 284-product Shopify export |
 
 ---
 
